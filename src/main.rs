@@ -3,9 +3,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-use std::net::ToSocketAddrs;
+use std::{io::Write, net::ToSocketAddrs};
 mod http;
-use http::HttpRequest;
+use http::{HttpRequest, HttpResponse};
 
 #[tokio::main]
 async fn main() -> tokio::io::Result<()> {
@@ -21,24 +21,27 @@ async fn main() -> tokio::io::Result<()> {
     }
 }
 
-fn correct_request_uri(request: &mut [u8]) -> Result<(), std::io::Error> {
+fn correct_request_uri(request: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     let request_str = String::from_utf8_lossy(request);
     let mut lines = request_str.lines();
     if let Some(first_line) = lines.next() {
         let mut parts = first_line.split_whitespace();
         if let (Some(method), Some(uri), Some(version)) = (parts.next(), parts.next(), parts.next()) {
             if let Ok(parsed_uri) = url::Url::parse(uri) {
-                if let Some(path) = parsed_uri.path_and_query() {
-                    let corrected_first_line = format!("{} {} {}", method, path, version);
-                    let mut corrected_request = corrected_first_line;
-                    for line in lines {
-                        corrected_request.push_str("\r\n");
-                        corrected_request.push_str(line);
-                    }
-                    corrected_request.push_str("\r\n\r\n");
-                    request[..corrected_request.len()].copy_from_slice(corrected_request.as_bytes());
-                    return Ok(());
+                let mut path_and_query = parsed_uri.path().to_string();
+                if let Some(query) = parsed_uri.query() {
+                    path_and_query.push('?');
+                    path_and_query.push_str(query);
                 }
+                let corrected_first_line = format!("{} {} {}", method, path_and_query, version);
+                let mut corrected_request = corrected_first_line;
+                for line in lines {
+                    corrected_request.push_str("\r\n");
+                    corrected_request.push_str(line);
+                }
+                corrected_request.push_str("\r\n");
+                let corrected_bytes = corrected_request.into_bytes();
+                return Ok(corrected_bytes);
             }
         }
     }
@@ -55,36 +58,25 @@ async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<()> {
         return Ok(());
     }
 
-    let mut request = &buffer[..n];
+    let request = &buffer[..n];
     println!(">>> RAW REQUEST >>>\n{}", String::from_utf8_lossy(request));
-    correct_request_uri(&mut request)?;
+    let corrected_request = correct_request_uri(request)?;
     println!(
         ">>> CORRECTED REQUEST >>>\n{}",
-        String::from_utf8_lossy(&request[..n])
-    );
+        String::from_utf8_lossy(&corrected_request));
     // Parse host from the HTTP request
-    let host = extract_host(request)?;
+    let host = extract_host(&corrected_request)?;
     let addr = format!("{}:80", host);
     let mut server_stream = TcpStream::connect(addr.to_socket_addrs()?.next().unwrap()).await?;
-    let mut http_request = HttpRequest::parse(request).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to parse request: {}", e))
-    })?;
-    match http_request.replace_proxy_uri(){
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error replacing proxy URI: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
-        }
-    }
-    
 
-    println!("Parsed HTTP request: {:?}", http_request);
     // Send request to the server
-    server_stream.write_all(request).await?;
-
+    server_stream.write_all(&corrected_request).await?;
     // Read response from the server
     let mut response = Vec::new();
     let mut temp = [0u8; 8192];
+    let mut content_length: Option<usize> = None;
+    let mut headers_parsed = false;
+    let mut total_body_read = 0usize;
 
     loop {
         let n = server_stream.read(&mut temp).await?;
@@ -92,6 +84,31 @@ async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<()> {
             break;
         }
         response.extend_from_slice(&temp[..n]);
+
+        if !headers_parsed {
+            if let Some(headers_end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                headers_parsed = true;
+                let header_bytes = &response[..headers_end + 4];
+                if let Ok(resp) = HttpResponse::parse(header_bytes) {
+                    if let Some(cl) = resp.get_header("Content-Length") {
+                        if let Ok(cl_num) = cl.parse::<usize>() {
+                            content_length = Some(cl_num);
+                        }
+                    }
+                }
+                total_body_read = response.len() - (headers_end + 4);
+                if let Some(cl) = content_length {
+                    if total_body_read >= cl {
+                        break;
+                    }
+                }
+            }
+        } else if let Some(cl) = content_length {
+            total_body_read += n;
+            if total_body_read >= cl {
+                break;
+            }
+        }
     }
 
     println!(
