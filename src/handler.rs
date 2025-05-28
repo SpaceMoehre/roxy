@@ -1,6 +1,6 @@
 use crate::{
     http::httpresponse::HttpResponse,
-    util::cert::{generate_ca_cert, generate_mitm_cert},
+    util::cert::{CertificateManager}, CERT_MANAGER,
 };
 use rustls::pki_types::PrivateKeyDer;
 use rustls_pki_types::ServerName;
@@ -14,8 +14,11 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::{rustls::ServerConfig, TlsConnector};
 
 async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io::Result<()> {
+    println!("Handling SSL connection...");
     let request_str = String::from_utf8_lossy(request);
+    println!("Received request: {}", request_str);
     let mut parts = request_str.split_whitespace();
+    println!("Request parts: {:?}", parts);
     if let (Some(_method), Some(host_port), Some(_)) =
         (parts.next(), parts.next(), parts.next())
     {
@@ -25,10 +28,12 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
         client_stream.write_all(response.as_bytes()).await?;
         println!("Established connection to {}", host);
 
-        let (ca_params, ca, ca_key) = generate_ca_cert().await;
-        println!("Generated CA certificate");
-        let (cert, keypair) = generate_mitm_cert(&ca_params, &ca, &ca_key, &host).await;
-        println!("Generated MITM certificate for {}", host);
+        let manager = CERT_MANAGER.clone();
+        println!("Certificate manager acquired");
+        let mut cert_manager = manager.lock().await;
+        println!("Certificate manager locked");
+        let (cert,keypair) = cert_manager.get_cert(&host).await.unwrap();
+        // drop(cert_manager); // Release the lock after getting the cert
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(
@@ -36,6 +41,7 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
                 PrivateKeyDer::try_from(keypair.serialize_der()).unwrap(),
             )
             .expect("Failed to create server config");
+
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         let mut root_cert_store = rustls::RootCertStore::empty();
@@ -46,7 +52,7 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
             .with_root_certificates(root_cert_store)
             .with_no_client_auth(); // i guess this was previously the default?
         let tls_connector = TlsConnector::from(Arc::new(config));
-        let tls_client = tls_acceptor.accept(client_stream).await?;
+        let tls_client = tls_acceptor.accept(client_stream).await.expect("Failed to accept TLS connection");
         println!("TLS connection established with client");
 
         // // TLS connection to real server
@@ -72,7 +78,8 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
             loop {
                 let n = client_reader.read(&mut buf).await?;
                 if n == 0 {
-                    break;
+                    println!("Client disconnected");
+                    return Ok(());
                 }
                 println!(
                     ">>> CLIENT → SERVER >>>\n{}",
@@ -89,7 +96,8 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
             loop {
                 let n = server_reader.read(&mut buf).await?;
                 if n == 0 {
-                    break;
+                    println!("Server disconnected");
+                    return Ok(());
                 }
                 println!(
                     "<<< SERVER → CLIENT <<<\n{}",
@@ -102,7 +110,7 @@ async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io:
 
         // Run both directions concurrently
         tokio::try_join!(client_to_server, server_to_client)?;
-
+        println!("Connection closed for host: {}", host);
         return Ok(());
     } else {
         return Err(tokio::io::Error::new(
@@ -177,6 +185,7 @@ async fn handle_http(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io
 }
 
 pub async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<()> {
+    println!("New client connected: {:?}", client_stream.peer_addr());
     let mut buffer = vec![0; 8192];
     let n = client_stream.read(&mut buffer).await?;
     if n == 0 {
@@ -184,14 +193,16 @@ pub async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<(
     }
 
     let request = &buffer[..n];
-
+    println!("Received request: {}", String::from_utf8_lossy(request));
     if request.starts_with("CONNECT ".as_bytes()) {
         // Handle CONNECT method for HTTPS
         handle_ssl(client_stream, request).await?;
+        println!("handle_ssl completed successfully");
         return Ok(());
     } else {
         // Handle HTTP method
         handle_http(client_stream, request).await?;
+        println!("handle_http completed successfully");
         return Ok(());
     }
 }

@@ -1455,6 +1455,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ntex",
+ "once_cell",
  "rcgen",
  "rustls",
  "rustls-pki-types",

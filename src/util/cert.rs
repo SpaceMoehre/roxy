@@ -1,13 +1,47 @@
 use ::time::OffsetDateTime;
 use rcgen::DnValue::PrintableString;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
+use std::collections::HashMap;
 use time::Duration;
 
+use crate::CERT_MANAGER;
 
-pub async fn generate_ca_cert() -> (CertificateParams, Certificate, KeyPair) {
+pub struct CertificateManager {
+    ca_params: CertificateParams,
+    ca_cert: Certificate,
+    ca_key: KeyPair,
+    certs: HashMap<String, (Certificate, KeyPair)>,
+}
+impl CertificateManager {
+    pub fn new() -> Self {
+        let (ca_params, ca_cert, ca_key) = generate_ca_cert();
+        CertificateManager {
+            ca_params,
+            ca_cert,
+            ca_key,
+            certs: HashMap::new(),
+        }
+    }
+
+    pub fn get_cert(&mut self, name: &str) -> Option<&(Certificate, KeyPair)> {
+        if self.certs.get(name).is_none() {
+            println!("Certificate for {} not found, generating new one.", name);
+            self.generate_mitm_cert(name);
+        }
+        self.certs.get(name)
+    }
+
+    fn generate_mitm_cert(&mut self, name: &str) {
+        let (cert, keypair) =
+            generate_mitm_cert(&self.ca_params, &self.ca_cert, &self.ca_key, name);
+        self.certs.insert(name.to_string(), (cert, keypair));
+    }
+}
+
+pub fn generate_ca_cert() -> (CertificateParams, Certificate, KeyPair) {
     let mut params =
         CertificateParams::new(Vec::default()).expect("empty subject alt name can't produce error");
     let (yesterday, tomorrow) = validity_period();
@@ -18,7 +52,7 @@ pub async fn generate_ca_cert() -> (CertificateParams, Certificate, KeyPair) {
     );
     params
         .distinguished_name
-        .push(DnType::OrganizationName, "Crab widgits SE");
+        .push(DnType::OrganizationName, "ROXY");
     params.key_usages.push(KeyUsagePurpose::DigitalSignature);
     params.key_usages.push(KeyUsagePurpose::KeyCertSign);
     params.key_usages.push(KeyUsagePurpose::CrlSign);
@@ -31,7 +65,7 @@ pub async fn generate_ca_cert() -> (CertificateParams, Certificate, KeyPair) {
     (params, cert, key_pair)
 }
 
-pub async fn generate_mitm_cert(
+pub fn generate_mitm_cert(
     ca: &CertificateParams,
     ca_cert: &Certificate,
     ca_key: &KeyPair,
@@ -61,4 +95,12 @@ fn validity_period() -> (OffsetDateTime, OffsetDateTime) {
     let yesterday = OffsetDateTime::now_utc() - day;
     let tomorrow = OffsetDateTime::now_utc() + day;
     (yesterday, tomorrow)
+}
+
+pub async fn get_certificate(name: &str) -> Option<(Certificate, KeyPair)> {
+    let manager = CERT_MANAGER.clone();
+    println!("Certificate manager acquired");
+    let mut cert_manager = manager.lock().await;
+    println!("Certificate manager locked");
+    cert_manager.get_cert(name).map(|(cert, keypair)| (cert.clone(), keypair.clone()))
 }
