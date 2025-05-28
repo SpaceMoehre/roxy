@@ -1,186 +1,118 @@
-use crate::http::httpresponse::HttpResponse;
-use rustls::pki_types::pem::PemObject;
-use rustls_pki_types::ServerName;
-use ::time::OffsetDateTime;
-use rcgen::DnValue::PrintableString;
-use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+use crate::{
+    http::httpresponse::HttpResponse,
+    util::cert::{generate_ca_cert, generate_mitm_cert},
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::PrivateKeyDer;
+use rustls_pki_types::ServerName;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
-use time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::{
-    io::{split, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    time,
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::{rustls::ServerConfig, TlsConnector};
 
+async fn handle_ssl(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io::Result<()> {
+    let request_str = String::from_utf8_lossy(request);
+    let mut parts = request_str.split_whitespace();
+    if let (Some(_method), Some(host_port), Some(_)) =
+        (parts.next(), parts.next(), parts.next())
+    {
+        let host = host_port.to_string();
+        println!("CONNECT request for host: {}", host);
+        let response = format!("HTTP/1.1 200 Connection Established\r\n\r\n");
+        client_stream.write_all(response.as_bytes()).await?;
+        println!("Established connection to {}", host);
 
-fn validity_period() -> (OffsetDateTime, OffsetDateTime) {
-    let day = Duration::new(86400, 0);
-    let yesterday = OffsetDateTime::now_utc() - day;
-    let tomorrow = OffsetDateTime::now_utc() + day;
-    (yesterday, tomorrow)
-}
+        let (ca_params, ca, ca_key) = generate_ca_cert().await;
+        println!("Generated CA certificate");
+        let (cert, keypair) = generate_mitm_cert(&ca_params, &ca, &ca_key, &host).await;
+        println!("Generated MITM certificate for {}", host);
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::try_from(keypair.serialize_der()).unwrap(),
+            )
+            .expect("Failed to create server config");
+        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
-async fn generate_ca_cert() -> (CertificateParams, Certificate, KeyPair) {
-    let mut params =
-        CertificateParams::new(Vec::default()).expect("empty subject alt name can't produce error");
-    let (yesterday, tomorrow) = validity_period();
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.distinguished_name.push(
-        DnType::CountryName,
-        PrintableString("BR".try_into().unwrap()),
-    );
-    params
-        .distinguished_name
-        .push(DnType::OrganizationName, "Crab widgits SE");
-    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    params.key_usages.push(KeyUsagePurpose::KeyCertSign);
-    params.key_usages.push(KeyUsagePurpose::CrlSign);
+        let mut root_cert_store = rustls::RootCertStore::empty();
 
-    params.not_before = yesterday;
-    params.not_after = tomorrow;
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let key_pair = KeyPair::generate().unwrap();
-    let cert = params.clone().self_signed(&key_pair).unwrap();
-    (params, cert, key_pair)
-}
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth(); // i guess this was previously the default?
+        let tls_connector = TlsConnector::from(Arc::new(config));
+        let tls_client = tls_acceptor.accept(client_stream).await?;
+        println!("TLS connection established with client");
 
-async fn generate_mitm_cert(
-    ca: &CertificateParams,
-    ca_cert: &Certificate,
-    ca_key: &KeyPair,
-    name: &str,
-) -> (Certificate, KeyPair) {
-    let mut params = CertificateParams::new(vec![name.into()]).expect("we know the name is valid");
-    let (yesterday, tomorrow) = validity_period();
-    params.distinguished_name.push(DnType::CommonName, name);
-    params.use_authority_key_identifier_extension = true;
-    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    params
-        .extended_key_usages
-        .push(ExtendedKeyUsagePurpose::ServerAuth);
-    params.not_before = yesterday;
-    params.not_after = tomorrow;
+        // // TLS connection to real server
+        let remote_tcp = TcpStream::connect(host_port).await?;
+        println!("Connected to remote server: {}", host_port);
+        println!(
+            "Establishing TLS connection to remote server  {}",
+            host.split(':').next().unwrap()
+        );
+        let domain = ServerName::try_from(host.split(':').next().unwrap())
+            .unwrap()
+            .to_owned();
+        let tls_server = tls_connector.connect(domain, remote_tcp).await?;
+        println!("TLS connection established with server");
 
-    let key_pair = KeyPair::generate().unwrap();
-    (
-        params.signed_by(&key_pair, ca_cert, ca_key).unwrap(),
-        key_pair,
-    )
-}
+        // Split the TLS streams into reader/writer halves
+        let (mut client_reader, mut client_writer) = tokio::io::split(tls_client);
+        let (mut server_reader, mut server_writer) = tokio::io::split(tls_server);
 
-pub async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<()> {
-    let mut buffer = vec![0; 8192];
-    let n = client_stream.read(&mut buffer).await?;
-    if n == 0 {
+        // Forward client → server
+        let client_to_server = async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = client_reader.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                println!(
+                    ">>> CLIENT → SERVER >>>\n{}",
+                    String::from_utf8_lossy(&buf[..n])
+                );
+                server_writer.write_all(&buf[..n]).await?;
+            }
+            Ok::<_, tokio::io::Error>(())
+        };
+
+        // Forward server → client
+        let server_to_client = async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = server_reader.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                println!(
+                    "<<< SERVER → CLIENT <<<\n{}",
+                    String::from_utf8_lossy(&buf[..n])
+                );
+                client_writer.write_all(&buf[..n]).await?;
+            }
+            Ok::<_, tokio::io::Error>(())
+        };
+
+        // Run both directions concurrently
+        tokio::try_join!(client_to_server, server_to_client)?;
+
         return Ok(());
+    } else {
+        return Err(tokio::io::Error::new(
+            tokio::io::ErrorKind::InvalidData,
+            "Invalid CONNECT request",
+        ));
     }
+}
 
-    let request = &buffer[..n];
-
-    if request.starts_with("CONNECT ".as_bytes()) {
-        // Handle CONNECT method for HTTPS
-        let request_str = String::from_utf8_lossy(request);
-        let mut parts = request_str.split_whitespace();
-        if let (Some(_method), Some(host_port), Some(version)) =
-            (parts.next(), parts.next(), parts.next())
-        {
-            let mut host = host_port.to_string();
-            println!("CONNECT request for host: {}", host);
-            let response = format!("HTTP/1.1 200 Connection Established\r\n\r\n");
-            client_stream.write_all(response.as_bytes()).await?;
-            println!("Established connection to {}", host);
-
-            let (ca_params, ca, ca_key) = generate_ca_cert().await;
-            println!("Generated CA certificate");
-            let (cert, keypair) = generate_mitm_cert(&ca_params, &ca, &ca_key, &host).await;
-            println!("Generated MITM certificate for {}", host);
-            let server_config = ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![cert.der().clone()],
-                    PrivateKeyDer::try_from(keypair.serialize_der()).unwrap(),
-                )
-                .expect("Failed to create server config");
-            let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-
-            let mut root_cert_store = rustls::RootCertStore::empty();
-
-            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            
-
-            let config = rustls::ClientConfig::builder()
-                .with_root_certificates(root_cert_store)
-                .with_no_client_auth(); // i guess this was previously the default?
-            let tls_connector = TlsConnector::from(Arc::new(config));
-            let tls_client = tls_acceptor.accept(client_stream).await?;
-            println!("TLS connection established with client");
-
-            // // TLS connection to real server
-            let remote_tcp = TcpStream::connect(host_port).await?;
-            println!("Connected to remote server: {}", host_port);
-            println!("Establishing TLS connection to remote server  {}", host.split(':').next().unwrap());
-            let domain = ServerName::try_from(host.split(':').next().unwrap()).unwrap().to_owned();
-            let tls_server = tls_connector.connect(domain, remote_tcp).await?;
-            println!("TLS connection established with server");
-
-            // Split the TLS streams into reader/writer halves
-            let (mut client_reader, mut client_writer) = tokio::io::split(tls_client);
-            let (mut server_reader, mut server_writer) = tokio::io::split(tls_server);
-
-            // Forward client → server
-            let client_to_server = async {
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = client_reader.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    println!(
-                        ">>> CLIENT → SERVER >>>\n{}",
-                        String::from_utf8_lossy(&buf[..n])
-                    );
-                    server_writer.write_all(&buf[..n]).await?;
-                }
-                Ok::<_, tokio::io::Error>(())
-            };
-
-            // Forward server → client
-            let server_to_client = async {
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = server_reader.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    println!(
-                        "<<< SERVER → CLIENT <<<\n{}",
-                        String::from_utf8_lossy(&buf[..n])
-                    );
-                    client_writer.write_all(&buf[..n]).await?;
-                }
-                Ok::<_, tokio::io::Error>(())
-            };
-
-            // Run both directions concurrently
-            tokio::try_join!(client_to_server, server_to_client)?;
-
-            return Ok(());
-        } else {
-            return Err(tokio::io::Error::new(
-                tokio::io::ErrorKind::InvalidData,
-                "Invalid CONNECT request",
-            ));
-        }
-    }
-
+async fn handle_http(client_stream: &mut TcpStream, request: &[u8]) -> tokio::io::Result<()> {
     println!(">>> RAW REQUEST >>>\n{}", String::from_utf8_lossy(request));
     let corrected_request = correct_request_uri(request)?;
     println!(
@@ -241,8 +173,27 @@ pub async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<(
 
     // Send response back to client
     client_stream.write_all(&response).await?;
-
     Ok(())
+}
+
+pub async fn handle_client(client_stream: &mut TcpStream) -> tokio::io::Result<()> {
+    let mut buffer = vec![0; 8192];
+    let n = client_stream.read(&mut buffer).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let request = &buffer[..n];
+
+    if request.starts_with("CONNECT ".as_bytes()) {
+        // Handle CONNECT method for HTTPS
+        handle_ssl(client_stream, request).await?;
+        return Ok(());
+    } else {
+        // Handle HTTP method
+        handle_http(client_stream, request).await?;
+        return Ok(());
+    }
 }
 
 fn correct_request_uri(request: &[u8]) -> Result<Vec<u8>, std::io::Error> {
