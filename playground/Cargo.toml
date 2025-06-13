@@ -1,0 +1,19 @@
+[package]
+name = "playground"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+docopt = "~1.1"
+env_logger = "0.10"
+log = { version = "0.4.4" }
+mio = { version = "0.8", features = ["net", "os-poll"] }
+pki-types = { package = "rustls-pki-types", version = "1", features = ["std"] }
+rcgen = { version = "0.11.3", features = ["pem"], default-features = false }
+rustls-pemfile = "2"
+serde = "1.0"
+serde_derive = "1.0"
+webpki-roots = "0.26"
+
+static_init = "1.0.3" #!craft!
+craftls = "0.0.2"

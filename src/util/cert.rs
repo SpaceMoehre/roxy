@@ -102,5 +102,7 @@ pub async fn get_certificate(name: &str) -> Option<(Certificate, KeyPair)> {
     println!("Certificate manager acquired");
     let mut cert_manager = manager.lock().await;
     println!("Certificate manager locked");
-    cert_manager.get_cert(name).map(|(cert, keypair)| (cert.clone(), keypair.clone()))
+    let (cert, keypair) = cert_manager.get_cert(name).unwrap();
+    // Return references instead of cloning, or serialize as needed
+    Some((cert.clone(), keypair.clone()))
 }
