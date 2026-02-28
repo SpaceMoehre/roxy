@@ -2,6 +2,7 @@ use std::{
     convert::Infallible,
     fmt::Write as _,
     io,
+    io::Read,
     net::SocketAddr,
     sync::{Arc, Once},
     time::Instant,
@@ -376,10 +377,29 @@ impl ProxyEngine {
 
         let status = upstream_response.status();
         let headers = upstream_response.headers().clone();
-        let response_body = upstream_response
+        let encoded_response_body = upstream_response
             .bytes()
             .await
             .context("failed reading upstream response body")?;
+        let content_encoding = content_encoding_from_headers(&headers);
+        let mut response_decoded = false;
+        let response_body = match decode_http_body_bytes(
+            encoded_response_body.as_ref(),
+            content_encoding.as_deref(),
+        ) {
+            Ok(decoded) => {
+                response_decoded = true;
+                Bytes::from(decoded)
+            }
+            Err(err) => {
+                warn!(
+                    %err,
+                    encoding = ?content_encoding,
+                    "failed decoding upstream response body; preserving original bytes"
+                );
+                encoded_response_body
+            }
+        };
 
         let mut captured_response = CapturedResponse {
             request_id,
@@ -388,6 +408,14 @@ impl ProxyEngine {
             headers: headers
                 .iter()
                 .filter_map(|(name, value)| {
+                    if name.as_str().eq_ignore_ascii_case("content-length")
+                        || name.as_str().eq_ignore_ascii_case("transfer-encoding")
+                    {
+                        return None;
+                    }
+                    if response_decoded && name.as_str().eq_ignore_ascii_case("content-encoding") {
+                        return None;
+                    }
                     value.to_str().ok().map(|v| HeaderValuePair {
                         name: name.to_string(),
                         value: v.to_string(),
@@ -455,7 +483,9 @@ impl ProxyEngine {
         let mut response_builder = Response::builder().status(status);
 
         for header in &captured_response.headers {
-            if header.name.eq_ignore_ascii_case("content-length") {
+            if header.name.eq_ignore_ascii_case("content-length")
+                || header.name.eq_ignore_ascii_case("transfer-encoding")
+            {
                 continue;
             }
             if let (Ok(name), Ok(value)) = (
@@ -612,6 +642,97 @@ fn request_target_for_blob(parts: &http::request::Parts) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+fn content_encoding_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn decode_http_body_bytes(body: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>> {
+    let Some(content_encoding) = content_encoding else {
+        return Ok(match maybe_decode_http_body_by_magic(body)? {
+            Some(decoded) => decoded,
+            None => body.to_vec(),
+        });
+    };
+
+    let mut decoded = body.to_vec();
+    let encodings: Vec<String> = content_encoding
+        .split(',')
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty() && v != "identity")
+        .collect();
+
+    for encoding in encodings.iter().rev() {
+        decoded = match encoding.as_str() {
+            "gzip" | "x-gzip" => {
+                let mut decoder = flate2::read::GzDecoder::new(decoded.as_slice());
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .context("failed decoding gzip body")?;
+                out
+            }
+            "deflate" => {
+                let mut out = Vec::new();
+                let zlib_attempt = {
+                    let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice());
+                    decoder.read_to_end(&mut out)
+                };
+                if zlib_attempt.is_ok() {
+                    out
+                } else {
+                    let mut raw_out = Vec::new();
+                    let mut decoder = flate2::read::DeflateDecoder::new(decoded.as_slice());
+                    decoder
+                        .read_to_end(&mut raw_out)
+                        .context("failed decoding deflate body")?;
+                    raw_out
+                }
+            }
+            "br" => {
+                let mut decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .context("failed decoding brotli body")?;
+                out
+            }
+            "zstd" | "x-zstd" => {
+                zstd::stream::decode_all(decoded.as_slice()).context("failed decoding zstd body")?
+            }
+            unknown => {
+                return Err(anyhow!(
+                    "unsupported content-encoding '{unknown}' while decoding upstream response"
+                ));
+            }
+        };
+    }
+
+    Ok(decoded)
+}
+
+fn maybe_decode_http_body_by_magic(body: &[u8]) -> Result<Option<Vec<u8>>> {
+    if body.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::GzDecoder::new(body);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .context("failed decoding gzip body by magic header")?;
+        return Ok(Some(out));
+    }
+
+    if body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        let out =
+            zstd::stream::decode_all(body).context("failed decoding zstd body by magic header")?;
+        return Ok(Some(out));
+    }
+
+    Ok(None)
+}
+
 fn format_body_preview(bytes: &[u8], max_bytes: usize) -> String {
     let shown = bytes.len().min(max_bytes);
     let mut out = String::new();
@@ -672,7 +793,9 @@ fn ensure_rustls_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_body_preview;
+    use std::io::Write;
+
+    use super::{decode_http_body_bytes, format_body_preview};
 
     #[test]
     fn body_preview_escapes_binary_and_control_chars() {
@@ -685,5 +808,29 @@ mod tests {
     fn body_preview_truncates_when_limit_is_hit() {
         let preview = format_body_preview(b"abcdef", 3);
         assert_eq!(preview, "abc...<truncated 3 bytes>");
+    }
+
+    #[test]
+    fn decodes_gzip_response() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"decoded").expect("write payload");
+        let compressed = encoder.finish().expect("finish gzip");
+
+        let decoded = decode_http_body_bytes(&compressed, Some("gzip")).expect("decode");
+        assert_eq!(decoded, b"decoded");
+    }
+
+    #[test]
+    fn decodes_zstd_response() {
+        let compressed = zstd::stream::encode_all("decoded-zstd".as_bytes(), 1).expect("encode");
+        let decoded = decode_http_body_bytes(&compressed, Some("zstd")).expect("decode");
+        assert_eq!(decoded, b"decoded-zstd");
+    }
+
+    #[test]
+    fn decodes_zstd_response_without_encoding_header_by_magic() {
+        let compressed = zstd::stream::encode_all("decoded-zstd".as_bytes(), 1).expect("encode");
+        let decoded = decode_http_body_bytes(&compressed, None).expect("decode");
+        assert_eq!(decoded, b"decoded-zstd");
     }
 }

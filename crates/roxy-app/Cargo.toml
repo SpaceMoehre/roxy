@@ -19,3 +19,4 @@ roxy-storage = { path = "../roxy-storage" }
 [dev-dependencies]
 reqwest.workspace = true
 tempfile.workspace = true
+zstd.workspace = true

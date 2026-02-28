@@ -250,6 +250,128 @@ async fn proxy_https_ifconfig_captured_in_roxy_api() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local socket permissions in test environment"]
+async fn proxy_decodes_zstd_response_for_client_and_history() {
+    let compressed_body =
+        zstd::stream::encode_all("{\"ip\":\"1.2.3.4\"}".as_bytes(), 1).expect("encode zstd");
+    let (upstream_addr, upstream_shutdown, upstream_task) = start_custom_upstream(
+        200,
+        vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Content-Encoding".to_string(), "zstd".to_string()),
+        ],
+        compressed_body,
+    )
+    .await;
+
+    let proxy_port = reserve_port();
+    let api_port = reserve_port();
+    let ws_port = reserve_port();
+    let data_dir = TempDir::new().expect("temp dir");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy-app"));
+    child
+        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
+        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
+        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_DATA_DIR", data_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = child.spawn().expect("failed to spawn roxy-app");
+    let _child_guard = ChildGuard::new(child);
+
+    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("api client");
+    wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
+
+    let proxy_client = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("proxy client");
+
+    let target_url = format!("http://{upstream_addr}/compressed");
+    let response = proxy_client
+        .get(&target_url)
+        .header("accept-encoding", "zstd")
+        .send()
+        .await
+        .expect("proxy request");
+    assert!(response.status().is_success());
+    assert!(
+        response.headers().get("content-encoding").is_none(),
+        "proxy should strip content-encoding after decoding"
+    );
+    let client_body = response.text().await.expect("read client body");
+    assert_eq!(client_body, r#"{"ip":"1.2.3.4"}"#);
+
+    wait_for(Duration::from_secs(10), || {
+        let api_client = api_client.clone();
+        let api_base = api_base.clone();
+        let target_url = target_url.clone();
+        async move {
+            let response = match api_client
+                .get(format!("{api_base}/history/recent?limit=100"))
+                .send()
+                .await
+            {
+                Ok(row) => row,
+                Err(_) => return false,
+            };
+            let payload: Value = match response.json().await {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            payload.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    let uri_matches = row
+                        .get("exchange")
+                        .and_then(|v| v.get("request"))
+                        .and_then(|v| v.get("uri"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|uri| uri == target_url);
+                    if !uri_matches {
+                        return false;
+                    }
+
+                    let response_headers = row
+                        .get("exchange")
+                        .and_then(|v| v.get("response"))
+                        .and_then(|v| v.get("headers"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let has_content_encoding = response_headers.iter().any(|h| {
+                        h.get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| name.eq_ignore_ascii_case("content-encoding"))
+                    });
+                    if has_content_encoding {
+                        return false;
+                    }
+
+                    let body_text = row
+                        .get("exchange")
+                        .and_then(|v| v.get("response"))
+                        .and_then(|v| v.get("body"))
+                        .and_then(decode_bytes_json_field);
+                    body_text.as_deref() == Some(r#"{"ip":"1.2.3.4"}"#)
+                })
+            })
+        }
+    })
+    .await;
+
+    let _ = upstream_shutdown.send(());
+    let _ = upstream_task.await;
+}
+
 fn reserve_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind local ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
@@ -314,6 +436,72 @@ async fn start_upstream() -> (
     });
 
     (addr, hits, shutdown_tx, task)
+}
+
+async fn start_custom_upstream(
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (
+    std::net::SocketAddr,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind custom upstream listener");
+    let addr = listener.local_addr().expect("upstream local addr");
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let body = Arc::new(body);
+    let headers = Arc::new(headers);
+
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else {
+                        continue;
+                    };
+                    let body = body.clone();
+                    let headers = headers.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0_u8; 2048];
+                        let mut read = Vec::new();
+                        loop {
+                            match stream.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    read.extend_from_slice(&buf[..n]);
+                                    if read.windows(4).any(|w| w == b"\r\n\r\n")
+                                        || read.windows(2).any(|w| w == b"\n\n")
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        let mut response = format!("HTTP/1.1 {} OK\r\n", status);
+                        for (k, v) in headers.iter() {
+                            response.push_str(k);
+                            response.push_str(": ");
+                            response.push_str(v);
+                            response.push_str("\r\n");
+                        }
+                        response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                        response.push_str("Connection: close\r\n\r\n");
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.write_all(body.as_ref()).await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            }
+        }
+    });
+
+    (addr, shutdown_tx, task)
 }
 
 async fn wait_for_health(client: &Client, api_base: &str, timeout_after: Duration) {
@@ -399,4 +587,17 @@ fn body_has_content(body: Option<&Value>) -> bool {
         return !s.is_empty();
     }
     false
+}
+
+fn decode_bytes_json_field(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        return Some(s.to_string());
+    }
+
+    let arr = value.as_array()?;
+    let bytes: Vec<u8> = arr
+        .iter()
+        .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+        .collect::<Option<Vec<_>>>()?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
 }
