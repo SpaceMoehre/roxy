@@ -9,32 +9,27 @@
   <body>
     <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
     <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
-
-    <header class="topbar">
-      <div class="brand-wrap">
-        <div class="brand-pill">ROXY</div>
-        <div>
-          <h1>Roxy Operator Console</h1>
-          <p class="subtitle">Intercept, inspect, mutate, attack.</p>
+    <div class="app-shell">
+      <header class="chrome" aria-label="Workspace controls">
+        <nav class="tabbar" aria-label="Main sections">
+          <button class="tab active" data-tab="target">Target</button>
+          <button class="tab" data-tab="proxy">Proxy</button>
+          <button class="tab" data-tab="intruder">Intruder</button>
+          <button class="tab" data-tab="repeater">Repeater</button>
+          <button class="tab" data-tab="decoder">Decoder</button>
+          <button class="tab" data-tab="events">Events</button>
+          <button class="tab" data-tab="settings">Settings</button>
+        </nav>
+        <div class="chrome-tools">
+          <button id="theme-toggle" type="button" class="theme-toggle" aria-pressed="false">Dark mode</button>
+          <div class="health-wrap">
+            <span class="health-dot" id="health-dot" aria-hidden="true"></span>
+            <span id="health-label">Connecting...</span>
+          </div>
         </div>
-      </div>
-      <div class="health-wrap">
-        <span class="health-dot" id="health-dot" aria-hidden="true"></span>
-        <span id="health-label">Connecting...</span>
-      </div>
-    </header>
+      </header>
 
-    <nav class="tabbar" aria-label="Main sections">
-      <button class="tab active" data-tab="target">Target</button>
-      <button class="tab" data-tab="proxy">Proxy</button>
-      <button class="tab" data-tab="intruder">Intruder</button>
-      <button class="tab" data-tab="repeater">Repeater</button>
-      <button class="tab" data-tab="decoder">Decoder</button>
-      <button class="tab" data-tab="events">Events</button>
-      <button class="tab" data-tab="settings">Settings</button>
-    </nav>
-
-    <main class="layout" id="layout-root">
+      <main class="layout" id="layout-root">
       <section class="panel active" id="tab-target">
         <div class="panel-head">
           <h2>Target Scope & Site Map</h2>
@@ -43,7 +38,7 @@
         <div class="split-grid">
           <article class="card">
             <h3>Site Map</h3>
-            <form id="scope-form" class="stack" style="margin-bottom: 0.65rem;">
+            <form id="scope-form" class="stack scope-form">
               <label for="scope-host">Add Scope Host (exact or wildcard: *.example.com)</label>
               <input id="scope-host" placeholder="*.target.tld" />
               <div class="button-row">
@@ -51,7 +46,7 @@
                 <button type="button" class="warn" id="scope-clear">Clear Scope</button>
               </div>
             </form>
-            <div id="scope-list" class="scroll-list" style="max-height: 120px; margin-bottom: 0.6rem;"></div>
+            <div id="scope-list" class="scroll-list scope-list-compact"></div>
             <div id="site-map" class="scroll-list" aria-live="polite"></div>
           </article>
           <article class="card">
@@ -126,7 +121,7 @@
         <div class="proxy-subpanel" id="proxy-subpanel-history">
           <article class="card">
             <div class="panel-head">
-              <h3 style="margin: 0;">All Captured Requests</h3>
+              <h3>All Captured Requests</h3>
               <button id="refresh-proxy-history">Refresh History</button>
             </div>
             <div class="proxy-history-layout">
@@ -287,7 +282,8 @@ Connection: close
           </p>
         </article>
       </section>
-    </main>
+      </main>
+    </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 

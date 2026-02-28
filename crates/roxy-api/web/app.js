@@ -1,4 +1,5 @@
 const apiBase = '/api/v1';
+const THEME_STORAGE_KEY = 'roxy-theme';
 
 const appState = {
   selectedRequest: null,
@@ -47,6 +48,32 @@ function toast(msg) {
 function setHealth(ok, text) {
   qs('health-label').textContent = text;
   qs('health-dot').classList.toggle('ok', ok);
+}
+
+function resolveInitialTheme() {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === 'dark' || stored === 'light') {
+    return stored;
+  }
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+  const normalized = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = normalized;
+  localStorage.setItem(THEME_STORAGE_KEY, normalized);
+
+  const btn = qs('theme-toggle');
+  if (btn) {
+    const darkEnabled = normalized === 'dark';
+    btn.setAttribute('aria-pressed', darkEnabled ? 'true' : 'false');
+    btn.textContent = darkEnabled ? 'Light mode' : 'Dark mode';
+  }
+}
+
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  applyTheme(current === 'dark' ? 'light' : 'dark');
 }
 
 function renderTabs() {
@@ -712,6 +739,7 @@ async function resolveDefaultWsUrl() {
 }
 
 function bindEvents() {
+  qs('theme-toggle').addEventListener('click', toggleTheme);
   qs('refresh-site-map').addEventListener('click', loadSiteMap);
   qs('refresh-proxy').addEventListener('click', loadInterceptQueues);
   qs('refresh-proxy-history').addEventListener('click', loadProxyHistory);
@@ -820,6 +848,7 @@ function bindEvents() {
 }
 
 async function init() {
+  applyTheme(resolveInitialTheme());
   renderTabs();
   renderProxySubtabs();
   setProxyHistoryMode('both');
