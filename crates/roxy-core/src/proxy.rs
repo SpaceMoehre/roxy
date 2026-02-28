@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    fmt::Write as _,
     io,
     net::SocketAddr,
     sync::{Arc, Once},
@@ -23,7 +24,7 @@ use tokio::{
     sync::{mpsc, watch},
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -304,24 +305,35 @@ impl ProxyEngine {
             body: raw_body.clone(),
             raw: request_blob,
         };
+        self.log_request_snapshot("captured", &captured_request);
 
         self.state
             .register_site_path(host, parts.uri.path().to_string());
 
         if self.state.intercept_enabled() {
+            self.log_debug(
+                request_id,
+                "request interception is enabled; waiting for interceptor decision",
+            );
             let rx = self.state.enqueue_intercept(captured_request.clone());
             match rx.await {
-                Ok(InterceptDecision::Forward) => {}
+                Ok(InterceptDecision::Forward) => {
+                    self.log_debug(request_id, "request interceptor decision: forward");
+                }
                 Ok(InterceptDecision::Drop) => {
+                    self.log_debug(request_id, "request interceptor decision: drop");
                     return Ok(build_text_response(
                         StatusCode::FORBIDDEN,
                         "request dropped by interceptor",
                     ));
                 }
                 Ok(InterceptDecision::Mutate(mutation)) => {
+                    self.log_debug(request_id, "request interceptor decision: mutate");
                     captured_request = apply_mutation(captured_request, mutation);
+                    self.log_request_snapshot("mutated", &captured_request);
                 }
                 Err(_) => {
+                    self.log_debug(request_id, "request interceptor canceled pending request");
                     return Ok(build_text_response(
                         StatusCode::CONFLICT,
                         "interceptor canceled request",
@@ -341,6 +353,7 @@ impl ProxyEngine {
         captured_request.host = parsed_request.host;
         captured_request.headers = parsed_request.headers.clone();
         captured_request.body = parsed_request.body.clone();
+        self.log_request_snapshot("forwarding", &captured_request);
 
         let mut outbound = self
             .client
@@ -383,14 +396,22 @@ impl ProxyEngine {
                 .collect(),
             body: response_body,
         };
+        self.log_response_snapshot("upstream", &captured_response);
 
         if self.state.intercept_response_enabled() {
+            self.log_debug(
+                request_id,
+                "response interception is enabled; waiting for interceptor decision",
+            );
             let rx = self
                 .state
                 .enqueue_response_intercept(captured_response.clone());
             match rx.await {
-                Ok(ResponseInterceptDecision::Forward) => {}
+                Ok(ResponseInterceptDecision::Forward) => {
+                    self.log_debug(request_id, "response interceptor decision: forward");
+                }
                 Ok(ResponseInterceptDecision::Drop) => {
+                    self.log_debug(request_id, "response interceptor decision: drop");
                     let exchange = CapturedExchange {
                         request: captured_request,
                         response: None,
@@ -404,9 +425,12 @@ impl ProxyEngine {
                     ));
                 }
                 Ok(ResponseInterceptDecision::Mutate(mutation)) => {
+                    self.log_debug(request_id, "response interceptor decision: mutate");
                     captured_response = apply_response_mutation(captured_response, mutation);
+                    self.log_response_snapshot("mutated", &captured_response);
                 }
                 Err(_) => {
+                    self.log_debug(request_id, "response interceptor canceled pending response");
                     return Ok(build_text_response(
                         StatusCode::CONFLICT,
                         "response interceptor canceled response",
@@ -445,7 +469,78 @@ impl ProxyEngine {
         let response = response_builder
             .body(Full::new(captured_response.body))
             .context("failed building downstream response")?;
+        self.log_debug(
+            request_id,
+            &format!(
+                "request completed in {}ms with status {}",
+                started.elapsed().as_millis(),
+                captured_response.status
+            ),
+        );
         Ok(response)
+    }
+
+    fn log_debug(&self, request_id: Uuid, message: &str) {
+        if !self.config.debug_logging.enabled {
+            return;
+        }
+        debug!(%request_id, "{message}");
+    }
+
+    fn log_request_snapshot(&self, phase: &str, request: &CapturedRequest) {
+        if !self.config.debug_logging.enabled {
+            return;
+        }
+
+        debug!(
+            request_id = %request.id,
+            phase,
+            method = %request.method,
+            uri = %request.uri,
+            host = %request.host,
+            headers = request.headers.len(),
+            body_bytes = request.body.len(),
+            raw_bytes = request.raw.len(),
+            "proxy request snapshot"
+        );
+        trace!(request_id = %request.id, phase, headers = ?request.headers, "proxy request headers");
+
+        if self.config.debug_logging.log_bodies {
+            let limit = self.config.debug_logging.body_preview_bytes;
+            debug!(
+                request_id = %request.id,
+                phase,
+                body_preview = %format_body_preview(request.body.as_ref(), limit),
+                raw_preview = %format_body_preview(request.raw.as_ref(), limit),
+                "proxy request body preview"
+            );
+        }
+    }
+
+    fn log_response_snapshot(&self, phase: &str, response: &CapturedResponse) {
+        if !self.config.debug_logging.enabled {
+            return;
+        }
+
+        debug!(
+            request_id = %response.request_id,
+            phase,
+            status = response.status,
+            headers = response.headers.len(),
+            body_bytes = response.body.len(),
+            "proxy response snapshot"
+        );
+        trace!(request_id = %response.request_id, phase, headers = ?response.headers, "proxy response headers");
+
+        if self.config.debug_logging.log_bodies {
+            let limit = self.config.debug_logging.body_preview_bytes;
+            debug!(
+                request_id = %response.request_id,
+                phase,
+                body_preview = %format_body_preview(response.body.as_ref(), limit),
+                "proxy response body preview"
+            );
+        }
     }
 }
 
@@ -517,6 +612,29 @@ fn request_target_for_blob(parts: &http::request::Parts) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+fn format_body_preview(bytes: &[u8], max_bytes: usize) -> String {
+    let shown = bytes.len().min(max_bytes);
+    let mut out = String::new();
+    for byte in &bytes[..shown] {
+        match *byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(*byte as char),
+            _ => {
+                let _ = write!(&mut out, "\\x{byte:02x}");
+            }
+        }
+    }
+
+    if bytes.len() > shown {
+        let remaining = bytes.len() - shown;
+        let _ = write!(&mut out, "...<truncated {remaining} bytes>");
+    }
+
+    out
+}
+
 async fn find_available_bind(start: SocketAddr) -> io::Result<SocketAddr> {
     let mut addr = start;
     loop {
@@ -550,4 +668,22 @@ fn ensure_rustls_crypto_provider() {
     INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_body_preview;
+
+    #[test]
+    fn body_preview_escapes_binary_and_control_chars() {
+        let bytes = b"line1\nline2\t\x00\xff";
+        let preview = format_body_preview(bytes, 128);
+        assert_eq!(preview, "line1\\nline2\\t\\x00\\xff");
+    }
+
+    #[test]
+    fn body_preview_truncates_when_limit_is_hit() {
+        let preview = format_body_preview(b"abcdef", 3);
+        assert_eq!(preview, "abc...<truncated 3 bytes>");
+    }
 }

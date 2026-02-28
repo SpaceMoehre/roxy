@@ -7,7 +7,7 @@ pub mod raw_http;
 pub mod state;
 
 pub use cert::{CaCertificate, CertManager, DomainCertificate};
-pub use config::ProxyConfig;
+pub use config::{DebugLoggingConfig, ProxyConfig};
 pub use intruder::{
     IntruderEvent, IntruderJobDetails, IntruderJobSnapshot, IntruderJobSpec, IntruderJobStatus,
     IntruderManager, IntruderPayloadSet, IntruderResult, IntruderStrategy,

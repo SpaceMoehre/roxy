@@ -1,11 +1,14 @@
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use roxy_api::{
     ApiState, run_api_with_shutdown,
     ws::{WsHub, run_ws_server_with_shutdown},
 };
-use roxy_core::{AppState, CertManager, EventEnvelope, IntruderManager, ProxyConfig, ProxyEngine};
+use roxy_core::{
+    AppState, CertManager, DebugLoggingConfig, EventEnvelope, IntruderManager, ProxyConfig,
+    ProxyEngine,
+};
 use roxy_plugin::PluginManager;
 use roxy_storage::StorageManager;
 use serde_json::Value;
@@ -15,9 +18,18 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CliOptions {
+    debug: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    let cli = parse_cli_options_from_args(env::args().skip(1))?;
+    let debug_logging_enabled = cli.debug || read_bool_env("ROXY_DEBUG_LOGGING", false)?;
+    let debug_log_bodies = read_bool_env("ROXY_DEBUG_LOG_BODIES", false)?;
+    let debug_log_body_limit = read_usize_env("ROXY_DEBUG_LOG_BODY_LIMIT", 2048)?;
+    init_tracing(debug_logging_enabled);
 
     let proxy_bind = read_addr_env("ROXY_PROXY_BIND", "127.0.0.1:8080")?;
     let api_bind = read_addr_env("ROXY_API_BIND", "127.0.0.1:3000")?;
@@ -74,6 +86,11 @@ async fn main() -> Result<()> {
     let proxy = ProxyEngine::new(
         ProxyConfig {
             bind: proxy_bind,
+            debug_logging: DebugLoggingConfig {
+                enabled: debug_logging_enabled,
+                log_bodies: debug_log_bodies,
+                body_preview_bytes: debug_log_body_limit,
+            },
             ..ProxyConfig::default()
         },
         app_state.clone(),
@@ -100,7 +117,16 @@ async fn main() -> Result<()> {
             .block_on(async move { run_api_with_shutdown(api_bind, api_state, api_shutdown).await })
     });
 
-    info!(%proxy_bind, %api_bind, %ws_bind, "roxy started");
+    info!(
+        %proxy_bind,
+        %api_bind,
+        %ws_bind,
+        debug_cli = cli.debug,
+        debug_logging_enabled,
+        debug_log_bodies,
+        debug_log_body_limit,
+        "roxy started"
+    );
 
     let mut ctrl_c_triggered = false;
     tokio::select! {
@@ -143,12 +169,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing(debug_logging_enabled: bool) {
+    let default_filter = if debug_logging_enabled {
+        "debug,roxy_core::proxy=trace,roxy_api=debug"
+    } else {
+        "info"
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| default_filter.into()),
         )
         .try_init();
+}
+
+fn parse_cli_options_from_args<I>(args: I) -> Result<CliOptions>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut options = CliOptions::default();
+    for arg in args {
+        match arg.as_str() {
+            "--debug" => {
+                options.debug = true;
+            }
+            unknown => {
+                return Err(anyhow!(
+                    "unknown argument '{unknown}'. supported flags: --debug"
+                ));
+            }
+        }
+    }
+    Ok(options)
 }
 
 fn read_addr_env(key: &str, default: &str) -> Result<SocketAddr> {
@@ -156,6 +208,36 @@ fn read_addr_env(key: &str, default: &str) -> Result<SocketAddr> {
     value
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid socket address in {key}: {value}"))
+}
+
+fn read_bool_env(key: &str, default: bool) -> Result<bool> {
+    match env::var(key) {
+        Ok(value) => parse_bool_env_value(key, &value),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(anyhow!("failed reading {key}: {err}")),
+    }
+}
+
+fn parse_bool_env_value(key: &str, value: &str) -> Result<bool> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(anyhow!(
+            "invalid boolean in {key}: '{value}' (accepted: true/false/1/0/yes/no/on/off)"
+        )),
+    }
+}
+
+fn read_usize_env(key: &str, default: usize) -> Result<usize> {
+    match env::var(key) {
+        Ok(value) => value
+            .trim()
+            .parse::<usize>()
+            .with_context(|| format!("invalid usize in {key}: {value}")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(anyhow!("failed reading {key}: {err}")),
+    }
 }
 
 fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
@@ -203,4 +285,42 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     }
 
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_bool_env_value, parse_cli_options_from_args};
+
+    #[test]
+    fn parse_bool_env_accepts_common_truthy_values() {
+        for value in ["1", "true", "yes", "on", "TRUE", " On "] {
+            assert!(parse_bool_env_value("TEST", value).expect("valid bool"));
+        }
+    }
+
+    #[test]
+    fn parse_bool_env_accepts_common_falsy_values() {
+        for value in ["0", "false", "no", "off", "FALSE", " Off "] {
+            assert!(!parse_bool_env_value("TEST", value).expect("valid bool"));
+        }
+    }
+
+    #[test]
+    fn parse_bool_env_rejects_invalid_values() {
+        let err = parse_bool_env_value("TEST", "maybe").expect_err("invalid bool");
+        assert!(err.to_string().contains("invalid boolean"));
+    }
+
+    #[test]
+    fn parse_cli_options_accepts_debug() {
+        let opts =
+            parse_cli_options_from_args(vec!["--debug".to_string()]).expect("parse should work");
+        assert!(opts.debug);
+    }
+
+    #[test]
+    fn parse_cli_options_rejects_unknown_flag() {
+        let err = parse_cli_options_from_args(vec!["--wat".to_string()]).expect_err("should fail");
+        assert!(err.to_string().contains("unknown argument"));
+    }
 }

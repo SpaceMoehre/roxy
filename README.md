@@ -84,7 +84,13 @@ ROXY_PROXY_BIND=127.0.0.1:8080 \
 ROXY_API_BIND=127.0.0.1:3000 \
 ROXY_WS_BIND=127.0.0.1:3001 \
 ROXY_DATA_DIR=.roxy-data \
-cargo run -p roxy-app
+cargo run -p roxy
+```
+
+Debug startup with CLI flag:
+
+```bash
+cargo run -p roxy -- --debug
 ```
 
 Open:
@@ -105,6 +111,19 @@ Notes:
 | `ROXY_API_BIND` | `127.0.0.1:3000` | API/UI listener |
 | `ROXY_WS_BIND` | `127.0.0.1:3001` | WebSocket listener |
 | `ROXY_DATA_DIR` | `.roxy-data` | Cert and storage root |
+| `ROXY_DEBUG_LOGGING` | `false` | Enables extensive proxy debug logs |
+| `ROXY_DEBUG_LOG_BODIES` | `false` | Includes request/response body previews in debug logs |
+| `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes logged per body preview |
+
+Debugging example:
+
+```bash
+ROXY_DEBUG_LOGGING=true \
+ROXY_DEBUG_LOG_BODIES=true \
+ROXY_DEBUG_LOG_BODY_LIMIT=8192 \
+RUST_LOG=debug \
+cargo run -p roxy
+```
 
 ## API Summary
 
