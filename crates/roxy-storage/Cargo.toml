@@ -1,0 +1,20 @@
+[package]
+name = "roxy-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sled.workspace = true
+tantivy.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+roxy-core = { path = "../roxy-core" }
+
+[dev-dependencies]
+bytes.workspace = true
+tempfile.workspace = true
