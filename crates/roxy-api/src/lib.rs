@@ -510,6 +510,7 @@ async fn index(state: web::types::State<ApiState>) -> HttpResponse {
     match render_index_html(&state) {
         Ok(html) => HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
+            .set_header("cache-control", "no-store")
             .body(html),
         Err(err) => {
             error!(%err, "web ui html rendering failed");
@@ -525,6 +526,7 @@ async fn app_js(state: web::types::State<ApiState>) -> HttpResponse {
     match render_app_js(&state) {
         Ok(js) => HttpResponse::Ok()
             .content_type("application/javascript; charset=utf-8")
+            .set_header("cache-control", "no-store")
             .body(js),
         Err(err) => {
             error!(%err, "web ui script rendering failed");
@@ -539,6 +541,7 @@ async fn app_js(state: web::types::State<ApiState>) -> HttpResponse {
 async fn styles_css() -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/css; charset=utf-8")
+        .set_header("cache-control", "no-store")
         .body(STYLES_CSS)
 }
 

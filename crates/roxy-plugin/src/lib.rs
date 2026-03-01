@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
-    sync::RwLock,
+    sync::{RwLock, broadcast},
     time::{Duration, timeout},
 };
 
@@ -39,14 +39,50 @@ pub struct PluginAlteration {
     pub summary: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginEventRegistration {
+    pub name: String,
+    pub hooks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "event", content = "payload", rename_all = "snake_case")]
+pub enum PluginManagerEvent {
+    PluginRegistered(PluginEventRegistration),
+    PluginUnregistered { name: String },
+    PluginSettingsUpdated { name: String },
+    PluginAlterationRecorded(PluginAlteration),
+}
+
+#[derive(Clone)]
 pub struct PluginManager {
     registry: Arc<RwLock<HashMap<String, PluginRegistration>>>,
     settings: Arc<RwLock<HashMap<String, Value>>>,
     alterations: Arc<RwLock<HashMap<String, Vec<PluginAlteration>>>>,
+    events_tx: Arc<broadcast::Sender<PluginManagerEvent>>,
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        let (events_tx, _) = broadcast::channel(4096);
+        Self {
+            registry: Arc::new(RwLock::new(HashMap::new())),
+            settings: Arc::new(RwLock::new(HashMap::new())),
+            alterations: Arc::new(RwLock::new(HashMap::new())),
+            events_tx: Arc::new(events_tx),
+        }
+    }
 }
 
 impl PluginManager {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<PluginManagerEvent> {
+        self.events_tx.subscribe()
+    }
+
+    fn publish_event(&self, event: PluginManagerEvent) {
+        let _ = self.events_tx.send(event);
+    }
+
     pub async fn register(&self, registration: PluginRegistration) -> Result<()> {
         if !registration.script_path.exists() {
             return Err(anyhow!(
@@ -55,6 +91,10 @@ impl PluginManager {
             ));
         }
 
+        let event_registration = PluginEventRegistration {
+            name: registration.name.clone(),
+            hooks: registration.hooks.clone(),
+        };
         let plugin_name = registration.name.clone();
         self.registry
             .write()
@@ -70,6 +110,7 @@ impl PluginManager {
             .await
             .entry(plugin_name)
             .or_insert_with(Vec::new);
+        self.publish_event(PluginManagerEvent::PluginRegistered(event_registration));
         Ok(())
     }
 
@@ -78,6 +119,9 @@ impl PluginManager {
         if removed {
             self.settings.write().await.remove(name);
             self.alterations.write().await.remove(name);
+            self.publish_event(PluginManagerEvent::PluginUnregistered {
+                name: name.to_string(),
+            });
         }
         removed
     }
@@ -160,6 +204,9 @@ impl PluginManager {
             .write()
             .await
             .insert(plugin_name.to_string(), normalize_plugin_settings(settings));
+        self.publish_event(PluginManagerEvent::PluginSettingsUpdated {
+            name: plugin_name.to_string(),
+        });
         Ok(())
     }
 
@@ -181,6 +228,7 @@ impl PluginManager {
             return Err(anyhow!("unknown plugin: {}", alteration.plugin));
         }
 
+        let event_alteration = alteration.clone();
         let mut alterations = self.alterations.write().await;
         let entries = alterations.entry(alteration.plugin.clone()).or_default();
         entries.push(alteration);
@@ -188,6 +236,9 @@ impl PluginManager {
             let drain = entries.len() - 1_000;
             entries.drain(0..drain);
         }
+        self.publish_event(PluginManagerEvent::PluginAlterationRecorded(
+            event_alteration,
+        ));
         Ok(())
     }
 
@@ -402,5 +453,88 @@ print(json.dumps({"settings": payload["payload"].get("plugin_settings", {})}))
 
         assert_eq!(response.output["settings"]["request_search"], "hello");
         assert_eq!(response.output["settings"]["request_replace"], "roxy");
+    }
+
+    #[tokio::test]
+    async fn publishes_plugin_events_for_realtime_consumers() {
+        let tmp = TempDir::new().expect("tempdir");
+        let script = tmp.path().join("plugin.py");
+        std::fs::write(&script, "print('{}')\n").expect("write script");
+
+        let manager = PluginManager::default();
+        let mut events = manager.subscribe_events();
+
+        manager
+            .register(PluginRegistration {
+                name: "events".to_string(),
+                script_path: script,
+                hooks: vec!["on_request_pre_capture".to_string()],
+            })
+            .await
+            .expect("register plugin");
+
+        match timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("register event timeout")
+            .expect("register event")
+        {
+            PluginManagerEvent::PluginRegistered(payload) => {
+                assert_eq!(payload.name, "events");
+                assert_eq!(payload.hooks, vec!["on_request_pre_capture"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        manager
+            .set_settings("events", serde_json::json!({"rule_count": 1}))
+            .await
+            .expect("set settings");
+
+        match timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("settings event timeout")
+            .expect("settings event")
+        {
+            PluginManagerEvent::PluginSettingsUpdated { name } => {
+                assert_eq!(name, "events");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        manager
+            .record_alteration(PluginAlteration {
+                plugin: "events".to_string(),
+                hook: "on_request_pre_capture".to_string(),
+                request_id: Some("abc-123".to_string()),
+                unix_ms: 42,
+                summary: "mutated request".to_string(),
+            })
+            .await
+            .expect("record alteration");
+
+        match timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("alteration event timeout")
+            .expect("alteration event")
+        {
+            PluginManagerEvent::PluginAlterationRecorded(payload) => {
+                assert_eq!(payload.plugin, "events");
+                assert_eq!(payload.request_id.as_deref(), Some("abc-123"));
+                assert_eq!(payload.summary, "mutated request");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert!(manager.unregister("events").await);
+        match timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("unregister event timeout")
+            .expect("unregister event")
+        {
+            PluginManagerEvent::PluginUnregistered { name } => {
+                assert_eq!(name, "events");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

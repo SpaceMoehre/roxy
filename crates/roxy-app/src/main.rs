@@ -18,7 +18,9 @@ use roxy_core::{
     AppState, AppStateEvent, CapturedRequest, CapturedResponse, CertManager, DebugLoggingConfig,
     EventEnvelope, HeaderValuePair, IntruderManager, ProxyConfig, ProxyEngine, ProxyMiddleware,
 };
-use roxy_plugin::{PluginAlteration, PluginInvocation, PluginManager, PluginRegistration};
+use roxy_plugin::{
+    PluginAlteration, PluginInvocation, PluginManager, PluginManagerEvent, PluginRegistration,
+};
 use roxy_storage::StorageManager;
 use serde_json::Value;
 use tokio::{
@@ -258,6 +260,21 @@ async fn main() -> Result<()> {
     let _intruder_event_dispatch = tokio::spawn(async move {
         while let Ok(event) = intruder_events.recv().await {
             ws_hub_intruder.publish(&event);
+        }
+    });
+
+    let mut plugin_events = plugins.subscribe_events();
+    let ws_hub_plugins = ws_hub.clone();
+    let _plugin_event_dispatch = tokio::spawn(async move {
+        while let Ok(event) = plugin_events.recv().await {
+            match event {
+                PluginManagerEvent::PluginRegistered(_)
+                | PluginManagerEvent::PluginUnregistered { .. }
+                | PluginManagerEvent::PluginSettingsUpdated { .. }
+                | PluginManagerEvent::PluginAlterationRecorded(_) => {
+                    ws_hub_plugins.publish(&event);
+                }
+            }
         }
     });
 

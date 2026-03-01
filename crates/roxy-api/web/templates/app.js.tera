@@ -1460,10 +1460,6 @@ function handleRealtimeEvent(message) {
     case 'upstream_proxy_settings_updated':
       applyUpstreamSettingsSnapshot(event.payload);
       break;
-    case 'job_updated':
-    case 'job_result':
-      invokeModuleHook('intruder', 'refresh');
-      break;
     default:
       break;
   }

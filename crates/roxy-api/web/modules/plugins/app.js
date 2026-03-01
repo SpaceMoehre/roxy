@@ -172,15 +172,30 @@
     }
 
     for (const row of rows) {
-      const div = document.createElement("div");
-      div.className = "scroll-item";
-      const when = row.unix_ms ? new Date(Number(row.unix_ms)).toLocaleTimeString() : "-";
-      div.innerHTML = `
-        <strong>${row.hook || "hook"}</strong> ${row.request_id || ""}<br>
-        <small>${when}</small><br>
-        <small>${row.summary || ""}</small>
-      `;
-      root.appendChild(div);
+      root.appendChild(createAlterationRowElement(row));
+    }
+  }
+
+  function createAlterationRowElement(row) {
+    const div = document.createElement("div");
+    div.className = "scroll-item";
+    const when = row.unix_ms ? new Date(Number(row.unix_ms)).toLocaleTimeString() : "-";
+    div.innerHTML = `
+      <strong>${row.hook || "hook"}</strong> ${row.request_id || ""}<br>
+      <small>${when}</small><br>
+      <small>${row.summary || ""}</small>
+    `;
+    return div;
+  }
+
+  function prependAlteration(ctx, row) {
+    const root = ctx.qs("plugins-alterations");
+    if (root.children.length === 1 && root.textContent.includes("No recorded alterations yet.")) {
+      root.innerHTML = "";
+    }
+    root.prepend(createAlterationRowElement(row));
+    while (root.children.length > 300) {
+      root.removeChild(root.lastElementChild);
     }
   }
 
@@ -334,8 +349,31 @@
       await loadPlugins(ctx);
       await loadAlterations(ctx);
     },
-    refreshIntervalMs(ctx) {
-      return Number(ctx.getModuleSetting("refresh_ms", 4000));
+    refreshIntervalMs() {
+      return 0;
+    },
+    async onRealtimeEvent(ctx, event) {
+      if (!event || typeof event !== "object") {
+        return;
+      }
+
+      if (event.event === "plugin_alteration_recorded" && event.payload) {
+        if (selectedPluginId(ctx) === event.payload.plugin) {
+          prependAlteration(ctx, event.payload);
+        }
+        return;
+      }
+
+      if (event.event === "plugin_registered" || event.event === "plugin_unregistered") {
+        await loadPlugins(ctx);
+        await loadSettings(ctx);
+        await loadAlterations(ctx);
+        return;
+      }
+
+      if (event.event === "plugin_settings_updated" && event.payload?.name === selectedPluginId(ctx)) {
+        await loadSettings(ctx);
+      }
     },
     onSettingsLoaded,
     onSettingsSave,

@@ -99,24 +99,11 @@
 
       let selectedRow = null;
       for (const row of data.results) {
-        const div = document.createElement('div');
-        div.className = 'scroll-item';
+        const div = createIntruderResultRow(ctx, root, row);
         if (ctx.state.selectedIntruderResultSequence === row.sequence) {
           div.classList.add('active');
           selectedRow = row;
         }
-        div.innerHTML = `
-          <strong>#${row.sequence}</strong> status=${row.status ?? 'ERR'} ${row.duration_ms}ms size=${row.response_size}<br>
-          <small>${JSON.stringify(row.payloads)}</small>
-        `;
-        div.addEventListener('click', () => {
-          ctx.state.selectedIntruderResultSequence = row.sequence;
-          renderIntruderResultDetail(ctx, row);
-          for (const el of root.children) {
-            el.classList.remove('active');
-          }
-          div.classList.add('active');
-        });
         root.appendChild(div);
       }
 
@@ -128,6 +115,25 @@
     } catch (err) {
       ctx.toast(`Intruder results failed: ${err.message}`);
     }
+  }
+
+  function createIntruderResultRow(ctx, root, row) {
+    const div = document.createElement('div');
+    div.className = 'scroll-item';
+    div.dataset.intruderResultSequence = String(row.sequence);
+    div.innerHTML = `
+      <strong>#${row.sequence}</strong> status=${row.status ?? 'ERR'} ${row.duration_ms}ms size=${row.response_size}<br>
+      <small>${JSON.stringify(row.payloads)}</small>
+    `;
+    div.addEventListener('click', () => {
+      ctx.state.selectedIntruderResultSequence = row.sequence;
+      renderIntruderResultDetail(ctx, row);
+      for (const el of root.children) {
+        el.classList.remove('active');
+      }
+      div.classList.add('active');
+    });
+    return div;
   }
 
   function clearIntruderResultDetail(ctx) {
@@ -193,19 +199,7 @@
       }
 
       for (const row of rows) {
-        const div = document.createElement('div');
-        div.className = 'scroll-item';
-        div.innerHTML = `
-          <strong>${row.name}</strong><br>
-          <small>${row.status} · ${row.completed}/${row.total}</small><br>
-          <small>${row.id}</small>
-        `;
-        div.addEventListener('click', async () => {
-          ctx.state.selectedIntruderJob = row.id;
-          ctx.state.selectedIntruderResultSequence = null;
-          await loadIntruderResults(ctx, row.id);
-        });
-        root.appendChild(div);
+        root.appendChild(createIntruderJobRow(ctx, row));
       }
 
       if (ctx.state.selectedIntruderJob) {
@@ -219,6 +213,67 @@
       }
     } catch (err) {
       ctx.toast(`Intruder jobs failed: ${err.message}`);
+    }
+  }
+
+  function createIntruderJobRow(ctx, row) {
+    const div = document.createElement('div');
+    div.className = 'scroll-item';
+    div.dataset.intruderJobId = row.id;
+    div.innerHTML = `
+      <strong>${row.name}</strong><br>
+      <small>${row.status} · ${row.completed}/${row.total}</small><br>
+      <small>${row.id}</small>
+    `;
+    div.addEventListener('click', async () => {
+      ctx.state.selectedIntruderJob = row.id;
+      ctx.state.selectedIntruderResultSequence = null;
+      await loadIntruderResults(ctx, row.id);
+    });
+    return div;
+  }
+
+  function upsertIntruderJobRow(ctx, snapshot) {
+    if (!snapshot || !snapshot.id) {
+      return;
+    }
+    const root = ctx.qs('intruder-jobs');
+    const existing = root.querySelector(`[data-intruder-job-id="${snapshot.id}"]`);
+    const row = createIntruderJobRow(ctx, snapshot);
+
+    if (existing) {
+      existing.replaceWith(row);
+    } else {
+      if (root.children.length === 1 && root.textContent.includes('No jobs.')) {
+        root.innerHTML = '';
+      }
+      root.prepend(row);
+    }
+  }
+
+  function appendRealtimeIntruderResult(ctx, payload) {
+    if (!payload || !payload.job_id || !payload.result) {
+      return;
+    }
+    if (ctx.state.selectedIntruderJob !== payload.job_id) {
+      return;
+    }
+
+    const root = ctx.qs('intruder-results');
+    if (root.children.length === 1 && root.textContent.includes('No results yet.')) {
+      root.innerHTML = '';
+    }
+    const sequence = String(payload.result.sequence);
+    if (root.querySelector(`[data-intruder-result-sequence="${sequence}"]`)) {
+      return;
+    }
+
+    const div = createIntruderResultRow(ctx, root, payload.result);
+    root.appendChild(div);
+    if (ctx.state.selectedIntruderResultSequence == null) {
+      ctx.state.selectedIntruderResultSequence = payload.result.sequence;
+      renderIntruderResultDetail(ctx, payload.result);
+      div.classList.add('active');
     }
   }
 
@@ -292,8 +347,19 @@
     refresh(ctx) {
       return loadIntruderJobs(ctx);
     },
-    refreshIntervalMs(ctx) {
-      return Number(ctx.getModuleSetting('refresh_ms', 5000));
+    refreshIntervalMs() {
+      return 0;
+    },
+    onRealtimeEvent(ctx, event) {
+      if (!event || typeof event !== 'object') {
+        return;
+      }
+      if (event.event === 'job_updated') {
+        upsertIntruderJobRow(ctx, event.payload);
+      }
+      if (event.event === 'job_result') {
+        appendRealtimeIntruderResult(ctx, event.payload);
+      }
     },
     onSettingsLoaded,
     onSettingsSave,
