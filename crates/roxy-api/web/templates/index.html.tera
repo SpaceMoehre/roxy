@@ -155,13 +155,15 @@
                     </div>
                   </div>
                   <div id="proxy-history-empty" class="scroll-item">Select a request from the list above.</div>
-                  <div id="proxy-history-request-wrap" class="proxy-history-pane">
-                    <h4>Request</h4>
-                    <pre id="proxy-history-request" class="output"></pre>
-                  </div>
-                  <div id="proxy-history-response-wrap" class="proxy-history-pane">
-                    <h4>Response</h4>
-                    <pre id="proxy-history-response" class="output"></pre>
+                  <div id="proxy-history-detail-grid" class="proxy-history-detail-grid">
+                    <div id="proxy-history-request-wrap" class="proxy-history-pane">
+                      <h4>Request</h4>
+                      <pre id="proxy-history-request" class="output"></pre>
+                    </div>
+                    <div id="proxy-history-response-wrap" class="proxy-history-pane">
+                      <h4>Response</h4>
+                      <pre id="proxy-history-response" class="output"></pre>
+                    </div>
                   </div>
                 </div>
               </div>

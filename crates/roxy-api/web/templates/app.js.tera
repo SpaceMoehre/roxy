@@ -806,6 +806,7 @@ function renderProxyHistoryList() {
 function renderProxyHistoryDetail() {
   const row = selectedProxyHistoryRow();
   const empty = qs('proxy-history-empty');
+  const detailGrid = qs('proxy-history-detail-grid');
   const reqWrap = qs('proxy-history-request-wrap');
   const respWrap = qs('proxy-history-response-wrap');
   const reqOut = qs('proxy-history-request');
@@ -814,6 +815,7 @@ function renderProxyHistoryDetail() {
 
   if (!row) {
     empty.style.display = 'block';
+    detailGrid.style.display = 'none';
     reqWrap.style.display = 'none';
     respWrap.style.display = 'none';
     meta.textContent = 'No request selected';
@@ -823,12 +825,14 @@ function renderProxyHistoryDetail() {
   const req = row.exchange.request;
   const resp = row.exchange.response;
   empty.style.display = 'none';
+  detailGrid.style.display = 'grid';
   meta.textContent = `${req.method} ${req.uri} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms`;
 
   reqOut.textContent = requestBlobText(req);
   respOut.textContent = responseBlobText(resp);
 
   const mode = appState.proxyHistoryMode;
+  detailGrid.classList.toggle('single-pane', mode !== 'both');
   reqWrap.style.display = mode === 'response' ? 'none' : 'block';
   respWrap.style.display = mode === 'request' ? 'none' : 'block';
 }

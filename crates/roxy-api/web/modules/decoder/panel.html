@@ -7,7 +7,16 @@
     <select id="decoder-mode">
       <option value="base64_encode">base64_encode</option>
       <option value="base64_decode">base64_decode</option>
-      <option value="plugin:custom">plugin:custom</option>
+      <option value="plugin:decoder-codec:base64_encode">plugin:decoder-codec:base64_encode</option>
+      <option value="plugin:decoder-codec:base64_decode">plugin:decoder-codec:base64_decode</option>
+      <option value="plugin:decoder-codec:base32_encode">plugin:decoder-codec:base32_encode</option>
+      <option value="plugin:decoder-codec:base32_decode">plugin:decoder-codec:base32_decode</option>
+      <option value="plugin:decoder-codec:hex_encode">plugin:decoder-codec:hex_encode</option>
+      <option value="plugin:decoder-codec:hex_decode">plugin:decoder-codec:hex_decode</option>
+      <option value="plugin:decoder-codec:url_encode">plugin:decoder-codec:url_encode</option>
+      <option value="plugin:decoder-codec:url_decode">plugin:decoder-codec:url_decode</option>
+      <option value="plugin:decoder-codec:html_encode">plugin:decoder-codec:html_encode</option>
+      <option value="plugin:decoder-codec:html_decode">plugin:decoder-codec:html_decode</option>
     </select>
     <label for="decoder-input">Input</label>
     <textarea id="decoder-input" rows="8"></textarea>

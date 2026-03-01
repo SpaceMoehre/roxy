@@ -1124,16 +1124,19 @@ async fn decode_transform(
             Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
         },
         _ if req.mode.starts_with("plugin:") => {
-            let plugin = req.mode.trim_start_matches("plugin:").trim();
+            let Some((plugin, plugin_mode)) = parse_plugin_decoder_mode(&req.mode) else {
+                return json_error(HttpResponse::BadRequest(), "invalid plugin decoder mode");
+            };
             match state
                 .plugins
                 .invoke(
-                    plugin,
+                    &plugin,
                     PluginInvocation {
                         hook: "decoder".to_string(),
                         payload: serde_json::json!({
                             "mode": req.mode,
-                            "payload": req.payload
+                            "payload": req.payload,
+                            "plugin_mode": plugin_mode
                         }),
                     },
                 )
@@ -1162,6 +1165,32 @@ async fn decode_transform(
         }
         _ => json_error(HttpResponse::BadRequest(), "unsupported decoder mode"),
     }
+}
+
+fn parse_plugin_decoder_mode(mode: &str) -> Option<(String, Option<String>)> {
+    if !mode.starts_with("plugin:") {
+        return None;
+    }
+    let raw = mode.trim_start_matches("plugin:").trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some((plugin, plugin_mode)) = raw.split_once(':') {
+        let plugin = plugin.trim();
+        if plugin.is_empty() {
+            return None;
+        }
+        let plugin_mode = plugin_mode.trim();
+        return Some((
+            plugin.to_string(),
+            if plugin_mode.is_empty() {
+                None
+            } else {
+                Some(plugin_mode.to_string())
+            },
+        ));
+    }
+    Some((raw.to_string(), None))
 }
 
 async fn intruder_create_job(
@@ -1593,5 +1622,20 @@ mod tests {
 
         let decoded = decode_http_body_bytes(&encoded, None).expect("decode");
         assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn parse_plugin_decoder_mode_supports_operation_suffix() {
+        let parsed =
+            parse_plugin_decoder_mode("plugin:decoder-codec:base64_encode").expect("must parse");
+        assert_eq!(parsed.0, "decoder-codec");
+        assert_eq!(parsed.1.as_deref(), Some("base64_encode"));
+    }
+
+    #[test]
+    fn parse_plugin_decoder_mode_supports_plain_plugin_name() {
+        let parsed = parse_plugin_decoder_mode("plugin:custom").expect("must parse");
+        assert_eq!(parsed.0, "custom");
+        assert_eq!(parsed.1, None);
     }
 }
