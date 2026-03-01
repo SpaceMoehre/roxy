@@ -42,13 +42,11 @@ COPY --from=builder /src/python/roxy-plugin-sdk ./python/roxy-plugin-sdk
 RUN mkdir -p /data \
     && chown -R roxy:roxy /app /data
 
-ENV ROXY_PROXY_BIND=0.0.0.0:8080
-ENV ROXY_API_BIND=0.0.0.0:3000
-ENV ROXY_WS_BIND=0.0.0.0:3001
+ENV ROXY_BIND=0.0.0.0:8080
 ENV ROXY_DATA_DIR=/data
 ENV ROXY_PLUGIN_DIR=/app/plugins
 
-EXPOSE 8080 3000 3001
+EXPOSE 8080
 VOLUME ["/data"]
 
 USER roxy

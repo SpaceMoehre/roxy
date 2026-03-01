@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,9 +10,9 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use roxy_api::{
-    ApiState, run_api_with_shutdown,
+    ApiState, run_api_with_shutdown_and_ready_uds,
     web_modules::{UiModule, UiModuleRegistry},
-    ws::{WsHub, run_ws_server_with_shutdown},
+    ws::{WsHub, run_ws_server_with_shutdown_and_ready_uds},
 };
 use roxy_core::{
     AppState, CapturedRequest, CapturedResponse, CertManager, DebugLoggingConfig, EventEnvelope,
@@ -22,6 +22,8 @@ use roxy_plugin::{PluginAlteration, PluginInvocation, PluginManager, PluginRegis
 use roxy_storage::StorageManager;
 use serde_json::Value;
 use tokio::{
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
     sync::{mpsc, watch},
     time::timeout,
 };
@@ -196,14 +198,17 @@ async fn main() -> Result<()> {
     let debug_log_body_limit = read_usize_env("ROXY_DEBUG_LOG_BODY_LIMIT", 2048)?;
     init_tracing(debug_logging_enabled);
 
-    let proxy_bind = read_addr_env("ROXY_PROXY_BIND", "127.0.0.1:8080")?;
-    let api_bind = read_addr_env("ROXY_API_BIND", "127.0.0.1:3000")?;
-    let ws_bind = read_addr_env("ROXY_WS_BIND", "127.0.0.1:3001")?;
+    let bind = read_addr_env("ROXY_BIND", "127.0.0.1:8080")?;
     let data_dir =
         PathBuf::from(env::var("ROXY_DATA_DIR").unwrap_or_else(|_| ".roxy-data".to_string()));
+    let runtime_dir = data_dir.join("run");
+    let api_uds_path = runtime_dir.join("api.sock");
+    let ws_uds_path = runtime_dir.join("ws.sock");
 
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("failed creating data dir {data_dir:?}"))?;
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("failed creating runtime dir {runtime_dir:?}"))?;
 
     let app_state = Arc::new(AppState::new());
     let cert_manager = Arc::new(CertManager::load_or_create(data_dir.join("certs"))?);
@@ -262,32 +267,39 @@ async fn main() -> Result<()> {
         ui_modules.clone(),
     ));
 
-    let proxy = ProxyEngine::new(
-        ProxyConfig {
-            bind: proxy_bind,
-            debug_logging: DebugLoggingConfig {
-                enabled: debug_logging_enabled,
-                log_bodies: debug_log_bodies,
-                body_preview_bytes: debug_log_body_limit,
+    let proxy = Arc::new(
+        ProxyEngine::new(
+            ProxyConfig {
+                bind: loopback_with_port(0),
+                debug_logging: DebugLoggingConfig {
+                    enabled: debug_logging_enabled,
+                    log_bodies: debug_log_bodies,
+                    body_preview_bytes: debug_log_body_limit,
+                },
+                ..ProxyConfig::default()
             },
-            ..ProxyConfig::default()
-        },
-        app_state.clone(),
-        cert_manager.clone(),
-        event_tx,
-    )
-    .with_middleware(plugin_bridge);
+            app_state.clone(),
+            cert_manager.clone(),
+            event_tx,
+        )
+        .with_middleware(plugin_bridge),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let proxy_shutdown = shutdown_rx.clone();
     let ws_shutdown = shutdown_rx.clone();
     let api_shutdown = shutdown_rx.clone();
-
-    let mut proxy_task = tokio::spawn(async move { proxy.run_with_shutdown(proxy_shutdown).await });
+    let mut ingress_shutdown = shutdown_rx.clone();
 
     let ws_hub_for_server = ws_hub.clone();
+    let ws_uds_for_server = ws_uds_path.clone();
     let mut ws_task = tokio::spawn(async move {
-        run_ws_server_with_shutdown(ws_bind, ws_hub_for_server, ws_shutdown).await
+        run_ws_server_with_shutdown_and_ready_uds(
+            ws_uds_for_server,
+            ws_hub_for_server,
+            ws_shutdown,
+            None,
+        )
+        .await
     });
 
     let api_state = ApiState::new(
@@ -296,19 +308,41 @@ async fn main() -> Result<()> {
         storage,
         plugins,
         intruder,
-        ws_hub,
+        ws_hub.clone(),
         ui_modules,
     );
+    let api_uds_for_server = api_uds_path.clone();
     let mut api_task = tokio::task::spawn_blocking(move || {
         let runner = ntex::rt::System::new("roxy-api");
-        runner
-            .block_on(async move { run_api_with_shutdown(api_bind, api_state, api_shutdown).await })
+        runner.block_on(async move {
+            run_api_with_shutdown_and_ready_uds(api_uds_for_server, api_state, api_shutdown, None)
+                .await
+        })
     });
 
+    let (ingress_listener, ingress_actual) = bind_available_tcp_listener(bind)
+        .await
+        .with_context(|| format!("failed to bind ingress listener from {bind}"))?;
+    let targets = IngressTargets {
+        proxy,
+        api_uds: api_uds_path,
+        ws_uds: ws_uds_path,
+    };
+    let mut ingress_task = tokio::spawn(async move {
+        run_ingress_with_shutdown(
+            bind,
+            ingress_actual,
+            ingress_listener,
+            targets,
+            &mut ingress_shutdown,
+        )
+        .await
+    });
+    ws_hub.set_listen_port(ingress_actual.port());
+
     info!(
-        %proxy_bind,
-        %api_bind,
-        %ws_bind,
+        requested_bind = %bind,
+        actual_bind = %ingress_actual,
         debug_cli = cli.debug,
         debug_logging_enabled,
         debug_log_bodies,
@@ -322,13 +356,13 @@ async fn main() -> Result<()> {
             let result = result.context("api task join failure")?;
             result.context("api server stopped unexpectedly")?;
         }
-        result = &mut proxy_task => {
-            let result = result.context("proxy task join failure")?;
-            result.context("proxy server stopped unexpectedly")?;
-        }
         result = &mut ws_task => {
             let result = result.context("websocket task join failure")?;
             result.context("websocket server stopped unexpectedly")?;
+        }
+        result = &mut ingress_task => {
+            let result = result.context("ingress task join failure")?;
+            result.context("ingress server stopped unexpectedly")?;
         }
         _ = tokio::signal::ctrl_c() => {
             info!("shutdown requested");
@@ -340,21 +374,168 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx.send(true);
 
         let graceful = timeout(Duration::from_secs(5), async {
-            let _ = (&mut proxy_task).await;
             let _ = (&mut ws_task).await;
             let _ = (&mut api_task).await;
+            let _ = (&mut ingress_task).await;
         })
         .await;
 
         if graceful.is_err() {
             warn!("graceful shutdown timed out, aborting remaining tasks");
-            proxy_task.abort();
             ws_task.abort();
             api_task.abort();
+            ingress_task.abort();
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct IngressTargets {
+    proxy: Arc<ProxyEngine>,
+    api_uds: PathBuf,
+    ws_uds: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngressRoute {
+    Proxy,
+    Api,
+    WebSocket,
+}
+
+async fn run_ingress_with_shutdown(
+    requested_bind: SocketAddr,
+    actual_bind: SocketAddr,
+    listener: TcpListener,
+    targets: IngressTargets,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    info!(
+        requested_bind = %requested_bind,
+        actual_bind = %actual_bind,
+        api_uds = %targets.api_uds.display(),
+        ws_uds = %targets.ws_uds.display(),
+        "ingress listener started"
+    );
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    info!("ingress listener shutdown requested");
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted.context("ingress accept failed")?;
+                let targets = targets.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = route_ingress_stream(stream, peer, targets).await {
+                        warn!(%err, %peer, "ingress stream routing failed");
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn route_ingress_stream(
+    stream: TcpStream,
+    peer: SocketAddr,
+    targets: IngressTargets,
+) -> Result<()> {
+    let route = detect_ingress_route(&stream).await;
+    match route {
+        IngressRoute::Proxy => targets.proxy.serve_stream(stream, peer).await,
+        IngressRoute::Api => tunnel_to_uds(stream, &targets.api_uds).await,
+        IngressRoute::WebSocket => tunnel_to_uds(stream, &targets.ws_uds).await,
+    }
+}
+
+async fn tunnel_to_uds(mut stream: TcpStream, path: &Path) -> Result<()> {
+    let mut upstream = tokio::net::UnixStream::connect(path)
+        .await
+        .with_context(|| format!("failed connecting ingress uds target {}", path.display()))?;
+    let _ = copy_bidirectional(&mut stream, &mut upstream)
+        .await
+        .context("ingress bidirectional copy failed")?;
+    Ok(())
+}
+
+async fn detect_ingress_route(stream: &TcpStream) -> IngressRoute {
+    let mut buf = [0_u8; 2048];
+    match timeout(Duration::from_millis(300), stream.peek(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => classify_ingress_route(&buf[..n]),
+        _ => IngressRoute::Proxy,
+    }
+}
+
+fn classify_ingress_route(buffer: &[u8]) -> IngressRoute {
+    let text = String::from_utf8_lossy(buffer);
+    let mut lines = text.lines();
+    let first = match lines.next() {
+        Some(line) => line.trim_end_matches('\r'),
+        None => return IngressRoute::Proxy,
+    };
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_ascii_uppercase();
+    let target = parts.next().unwrap_or_default();
+
+    if method == "CONNECT" || target.starts_with("http://") || target.starts_with("https://") {
+        return IngressRoute::Proxy;
+    }
+
+    if target.starts_with("/ws") && is_websocket_upgrade(buffer) {
+        return IngressRoute::WebSocket;
+    }
+
+    if target.starts_with('/') {
+        return IngressRoute::Api;
+    }
+
+    IngressRoute::Proxy
+}
+
+fn is_websocket_upgrade(buffer: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(buffer).to_ascii_lowercase();
+    let mut has_upgrade_websocket = false;
+    let mut has_connection_upgrade = false;
+
+    for line in text.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim();
+            let value = value.trim();
+            if name == "upgrade" && value.contains("websocket") {
+                has_upgrade_websocket = true;
+            }
+            if name == "connection" && value.contains("upgrade") {
+                has_connection_upgrade = true;
+            }
+        }
+    }
+
+    has_upgrade_websocket && has_connection_upgrade
+}
+
+async fn bind_available_tcp_listener(start: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
+    let mut addr = start;
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((listener, addr)),
+            Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                addr = increment_port(addr)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn init_tracing(debug_logging_enabled: bool) {
@@ -396,6 +577,22 @@ fn read_addr_env(key: &str, default: &str) -> Result<SocketAddr> {
     value
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid socket address in {key}: {value}"))
+}
+
+fn loopback_with_port(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
+    let port = addr.port();
+    if port == u16::MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "port range exhausted while searching for available bind",
+        ));
+    }
+    addr.set_port(port + 1);
+    Ok(addr)
 }
 
 fn read_bool_env(key: &str, default: bool) -> Result<bool> {
@@ -742,9 +939,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, CapturedRequest, CapturedResponse, UiModuleRegistry, apply_plugin_output_ops,
-        apply_request_middleware_output, apply_response_middleware_output, discover_plugin_scripts,
-        parse_bool_env_value, parse_cli_options_from_args,
+        AppState, CapturedRequest, CapturedResponse, IngressRoute, UiModuleRegistry,
+        apply_plugin_output_ops, apply_request_middleware_output, apply_response_middleware_output,
+        classify_ingress_route, discover_plugin_scripts, parse_bool_env_value,
+        parse_cli_options_from_args,
     };
 
     #[test]
@@ -778,6 +976,30 @@ mod tests {
     fn parse_cli_options_rejects_unknown_flag() {
         let err = parse_cli_options_from_args(vec!["--wat".to_string()]).expect_err("should fail");
         assert!(err.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn classify_ingress_connect_routes_to_proxy() {
+        let data = b"CONNECT ifconfig.co:443 HTTP/1.1\r\nhost: ifconfig.co:443\r\n\r\n";
+        assert_eq!(classify_ingress_route(data), IngressRoute::Proxy);
+    }
+
+    #[test]
+    fn classify_ingress_absolute_uri_routes_to_proxy() {
+        let data = b"GET http://example.com/a HTTP/1.1\r\nhost: example.com\r\n\r\n";
+        assert_eq!(classify_ingress_route(data), IngressRoute::Proxy);
+    }
+
+    #[test]
+    fn classify_ingress_ws_upgrade_routes_to_websocket() {
+        let data = b"GET /ws HTTP/1.1\r\nhost: 127.0.0.1\r\nupgrade: websocket\r\nconnection: keep-alive, Upgrade\r\n\r\n";
+        assert_eq!(classify_ingress_route(data), IngressRoute::WebSocket);
+    }
+
+    #[test]
+    fn classify_ingress_relative_path_routes_to_api() {
+        let data = b"GET /api/v1/health HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
+        assert_eq!(classify_ingress_route(data), IngressRoute::Api);
     }
 
     #[test]

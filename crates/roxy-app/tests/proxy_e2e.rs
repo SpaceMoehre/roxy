@@ -40,17 +40,13 @@ impl Drop for ChildGuard {
 async fn proxy_intercept_and_history_flow() {
     let (upstream_addr, upstream_hits, upstream_shutdown, upstream_task) = start_upstream().await;
 
-    let proxy_port = reserve_port();
-    let api_port = reserve_port();
-    let ws_port = reserve_port();
+    let ingress_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     let plugin_dir = format!("{}/../../plugins", env!("CARGO_MANIFEST_DIR"));
     child
-        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
-        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
-        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
         .env("ROXY_PLUGIN_DIR", plugin_dir)
         .env("ROXY_DATA_DIR", data_dir.path())
         .stdout(Stdio::null())
@@ -59,7 +55,7 @@ async fn proxy_intercept_and_history_flow() {
     let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
-    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
     let api_client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -75,7 +71,7 @@ async fn proxy_intercept_and_history_flow() {
     assert!(toggle_response.status().is_success());
 
     let proxy_client = Client::builder()
-        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
         .danger_accept_invalid_certs(true)
         .build()
         .expect("proxy client");
@@ -159,18 +155,16 @@ async fn proxy_intercept_and_history_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local socket permissions and outbound internet access"]
-async fn proxy_https_ifconfig_captured_in_roxy_api() {
-    let proxy_port = reserve_port();
-    let api_port = reserve_port();
-    let ws_port = reserve_port();
+#[ignore = "requires local socket permissions in test environment"]
+async fn single_port_ingress_routes_api_and_proxy() {
+    let (upstream_addr, upstream_hits, upstream_shutdown, upstream_task) = start_upstream().await;
+
+    let ingress_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
-        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
-        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
-        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
         .env("ROXY_DATA_DIR", data_dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -178,7 +172,7 @@ async fn proxy_https_ifconfig_captured_in_roxy_api() {
     let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
-    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
     let api_client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -186,7 +180,86 @@ async fn proxy_https_ifconfig_captured_in_roxy_api() {
     wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
 
     let proxy_client = Client::builder()
-        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("proxy client");
+
+    let target_url = format!("http://{upstream_addr}/single-port");
+    let response = proxy_client
+        .get(target_url.clone())
+        .send()
+        .await
+        .expect("proxy request");
+    assert_eq!(response.status().as_u16(), 200);
+    let body = response.text().await.expect("response body");
+    assert_eq!(body, "upstream-ok");
+
+    wait_for(Duration::from_secs(5), || async {
+        upstream_hits.load(Ordering::Relaxed) == 1
+    })
+    .await;
+
+    wait_for(Duration::from_secs(10), || {
+        let api_client = api_client.clone();
+        let api_base = api_base.clone();
+        let target_url = target_url.clone();
+        async move {
+            let response = match api_client
+                .get(format!("{api_base}/history/recent?limit=100"))
+                .send()
+                .await
+            {
+                Ok(row) => row,
+                Err(_) => return false,
+            };
+            let payload: Value = match response.json().await {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            payload.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("exchange")
+                        .and_then(|v| v.get("request"))
+                        .and_then(|v| v.get("uri"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|uri| uri == target_url)
+                })
+            })
+        }
+    })
+    .await;
+
+    let _ = upstream_shutdown.send(());
+    let _ = upstream_task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local socket permissions and outbound internet access"]
+async fn proxy_https_ifconfig_captured_in_roxy_api() {
+    let ingress_port = reserve_port();
+    let data_dir = TempDir::new().expect("temp dir");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
+    child
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
+        .env("ROXY_DATA_DIR", data_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = child.spawn().expect("failed to spawn roxy");
+    let _child_guard = ChildGuard::new(child);
+
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
+    let api_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("api client");
+    wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
+
+    let proxy_client = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
         .danger_accept_invalid_certs(true)
         .build()
         .expect("proxy client");
@@ -267,16 +340,12 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
     )
     .await;
 
-    let proxy_port = reserve_port();
-    let api_port = reserve_port();
-    let ws_port = reserve_port();
+    let ingress_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
-        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
-        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
-        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
         .env("ROXY_DATA_DIR", data_dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -284,7 +353,7 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
     let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
-    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
     let api_client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -292,7 +361,7 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
     wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
 
     let proxy_client = Client::builder()
-        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
         .danger_accept_invalid_certs(true)
         .build()
         .expect("proxy client");
@@ -379,16 +448,12 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
 async fn plugin_middleware_substitutes_request_and_response_blobs() {
     let (upstream_addr, upstream_hits, upstream_shutdown, upstream_task) = start_upstream().await;
 
-    let proxy_port = reserve_port();
-    let api_port = reserve_port();
-    let ws_port = reserve_port();
+    let ingress_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
-        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
-        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
-        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
         .env("ROXY_DATA_DIR", data_dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -396,7 +461,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
     let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
-    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
     let api_client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -427,7 +492,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
     .await;
 
     let index_html = api_client
-        .get(format!("http://127.0.0.1:{api_port}/"))
+        .get(format!("http://127.0.0.1:{ingress_port}/"))
         .send()
         .await
         .expect("fetch index")
@@ -461,7 +526,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
     assert!(save_settings.status().is_success());
 
     let proxy_client = Client::builder()
-        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
         .danger_accept_invalid_certs(true)
         .build()
         .expect("proxy client");

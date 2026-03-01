@@ -10,16 +10,12 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      ROXY_PROXY_BIND: 0.0.0.0:8080
-      ROXY_API_BIND: 0.0.0.0:3000
-      ROXY_WS_BIND: 0.0.0.0:3001
+      ROXY_BIND: 0.0.0.0:8080
       ROXY_DATA_DIR: /data
       ROXY_PLUGIN_DIR: /app/plugins
       RUST_LOG: info
     ports:
       - "8080:8080"
-      - "3000:3000"
-      - "3001:3001"
     volumes:
       - roxy_data:/data
       - ./plugins:/app/plugins:ro
@@ -29,7 +25,7 @@ services:
           "CMD",
           "python3",
           "-c",
-          "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3000/api/v1/health',timeout=2).status==200 else 1)",
+          "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health',timeout=2).status==200 else 1)",
         ]
       interval: 15s
       timeout: 3s

@@ -1,6 +1,7 @@
 use std::{
     io,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU16, AtomicUsize, Ordering},
@@ -11,8 +12,9 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpListener,
-    sync::{broadcast, watch},
+    sync::{broadcast, oneshot, watch},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, info, warn};
@@ -66,7 +68,16 @@ pub async fn run_ws_server(bind: SocketAddr, hub: WsHub) -> Result<()> {
 pub async fn run_ws_server_with_shutdown(
     bind: SocketAddr,
     hub: WsHub,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    run_ws_server_with_shutdown_and_ready(bind, hub, shutdown, None).await
+}
+
+pub async fn run_ws_server_with_shutdown_and_ready(
+    bind: SocketAddr,
+    hub: WsHub,
     mut shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<SocketAddr>>,
 ) -> Result<()> {
     let bind_addr = find_available_bind(bind)
         .await
@@ -75,6 +86,9 @@ pub async fn run_ws_server_with_shutdown(
         .await
         .with_context(|| format!("failed to bind websocket listener on {bind_addr}"))?;
     hub.set_listen_port(bind_addr.port());
+    if let Some(tx) = ready {
+        let _ = tx.send(bind_addr);
+    }
     info!(requested_bind = %bind, actual_bind = %bind_addr, "websocket listener started");
 
     loop {
@@ -100,7 +114,54 @@ pub async fn run_ws_server_with_shutdown(
     Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::TcpStream, hub: WsHub) -> Result<()> {
+pub async fn run_ws_server_with_shutdown_and_ready_uds(
+    path: impl AsRef<Path>,
+    hub: WsHub,
+    mut shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<PathBuf>>,
+) -> Result<()> {
+    let path = path.as_ref().to_path_buf();
+    cleanup_uds_socket_path(&path)?;
+
+    let listener = tokio::net::UnixListener::bind(&path).with_context(|| {
+        format!(
+            "failed to bind websocket uds listener at {}",
+            path.display()
+        )
+    })?;
+    if let Some(tx) = ready {
+        let _ = tx.send(path.clone());
+    }
+    info!(path = %path.display(), "websocket uds listener started");
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    info!(path = %path.display(), "websocket uds listener shutdown requested");
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _addr) = accepted.context("ws uds accept failed")?;
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_connection(stream, hub).await {
+                        debug!(%err, "websocket uds connection ended");
+                    }
+                });
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+async fn handle_connection<S>(stream: S, hub: WsHub) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let ws = accept_async(stream)
         .await
         .context("websocket handshake failed")?;
@@ -170,4 +231,11 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     }
     addr.set_port(port + 1);
     Ok(addr)
+}
+
+fn cleanup_uds_socket_path(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }

@@ -1,7 +1,12 @@
 pub mod web_modules;
 pub mod ws;
 
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,7 +23,7 @@ use roxy_storage::StorageManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tera::{Context as TeraContext, Tera};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -231,9 +236,19 @@ pub async fn run_api(bind: SocketAddr, state: ApiState) -> std::io::Result<()> {
 pub async fn run_api_with_shutdown(
     bind: SocketAddr,
     state: ApiState,
+    shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    run_api_with_shutdown_and_ready(bind, state, shutdown, None).await
+}
+
+pub async fn run_api_with_shutdown_and_ready(
+    bind: SocketAddr,
+    state: ApiState,
     mut shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<SocketAddr>>,
 ) -> std::io::Result<()> {
     let mut bind_addr = bind;
+    let mut ready = ready;
     loop {
         let server = web::HttpServer::new({
             let state = state.clone();
@@ -314,6 +329,9 @@ pub async fn run_api_with_shutdown(
         match server.bind(bind_addr) {
             Ok(server) => {
                 info!(requested_bind = %bind, actual_bind = %bind_addr, "api listener started");
+                if let Some(tx) = ready.take() {
+                    let _ = tx.send(bind_addr);
+                }
                 let srv = server.run();
                 let stopper = srv.clone();
                 ntex::rt::spawn(async move {
@@ -332,6 +350,112 @@ pub async fn run_api_with_shutdown(
             Err(err) => return Err(err),
         }
     }
+}
+
+pub async fn run_api_with_shutdown_and_ready_uds(
+    path: impl AsRef<Path>,
+    state: ApiState,
+    mut shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<PathBuf>>,
+) -> std::io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    cleanup_uds_socket_path(&path)?;
+
+    let server = web::HttpServer::new({
+        let state = state.clone();
+        move || {
+            web::App::new()
+                .state(state.clone())
+                .route("/", web::get().to(index))
+                .route("/app.js", web::get().to(app_js))
+                .route("/styles.css", web::get().to(styles_css))
+                .service(
+                    web::scope("/api/v1")
+                        .route("/health", web::get().to(health))
+                        .route("/proxy/intercept", web::get().to(get_intercept))
+                        .route("/proxy/intercept", web::put().to(set_intercept))
+                        .route(
+                            "/proxy/intercept-response",
+                            web::get().to(get_response_intercept),
+                        )
+                        .route(
+                            "/proxy/intercept-response",
+                            web::put().to(set_response_intercept),
+                        )
+                        .route("/proxy/mitm", web::get().to(get_mitm))
+                        .route("/proxy/mitm", web::put().to(set_mitm))
+                        .route("/proxy/intercepts", web::get().to(list_pending_intercepts))
+                        .route(
+                            "/proxy/intercepts/{id}/continue",
+                            web::post().to(continue_intercept),
+                        )
+                        .route(
+                            "/proxy/response-intercepts",
+                            web::get().to(list_pending_response_intercepts),
+                        )
+                        .route(
+                            "/proxy/response-intercepts/{id}/continue",
+                            web::post().to(continue_response_intercept),
+                        )
+                        .route("/proxy/settings/ca.der", web::get().to(download_ca_der))
+                        .route(
+                            "/proxy/settings/ca/regenerate",
+                            web::post().to(regenerate_ca),
+                        )
+                        .route("/target/site-map", web::get().to(site_map))
+                        .route("/target/scope", web::get().to(get_scope))
+                        .route("/target/scope", web::put().to(set_scope))
+                        .route("/target/scope", web::post().to(add_scope))
+                        .route("/target/scope/{host}", web::delete().to(remove_scope))
+                        .route("/history/search", web::get().to(history_search))
+                        .route("/history/recent", web::get().to(history_recent))
+                        .route("/ui/modules", web::get().to(list_ui_modules))
+                        .route("/ui/modules", web::post().to(register_ui_module))
+                        .route("/plugins", web::get().to(list_plugins))
+                        .route("/plugins", web::post().to(register_plugin))
+                        .route("/plugins/{id}", web::delete().to(unregister_plugin))
+                        .route("/plugins/{id}/settings", web::get().to(get_plugin_settings))
+                        .route("/plugins/{id}/settings", web::put().to(set_plugin_settings))
+                        .route(
+                            "/plugins/{id}/alterations",
+                            web::get().to(list_plugin_alterations),
+                        )
+                        .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
+                        .route("/repeater/send", web::post().to(repeater_send))
+                        .route("/decoder/transform", web::post().to(decode_transform))
+                        .route("/intruder/jobs", web::post().to(intruder_create_job))
+                        .route("/intruder/jobs", web::get().to(intruder_list_jobs))
+                        .route("/intruder/jobs/{id}", web::get().to(intruder_get_job))
+                        .route(
+                            "/intruder/jobs/{id}/results",
+                            web::get().to(intruder_get_job_results),
+                        )
+                        .route("/intruder/jobs/{id}", web::delete().to(intruder_delete_job))
+                        .route("/ws/stats", web::get().to(ws_stats)),
+                )
+        }
+    })
+    .disable_signals();
+
+    let server = server.bind_uds(&path)?;
+    if let Some(tx) = ready {
+        let _ = tx.send(path.clone());
+    }
+    info!(path = %path.display(), "api uds listener started");
+
+    let srv = server.run();
+    let stopper = srv.clone();
+    ntex::rt::spawn(async move {
+        loop {
+            if shutdown.changed().await.is_err() || *shutdown.borrow() {
+                let _ = stopper.stop(true).await;
+                break;
+            }
+        }
+    });
+    let result = srv.await;
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 fn render_index_html(state: &ApiState) -> Result<String> {
@@ -1008,6 +1132,13 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     }
     addr.set_port(port + 1);
     Ok(addr)
+}
+
+fn cleanup_uds_socket_path(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 fn apply_plugin_output_ops(

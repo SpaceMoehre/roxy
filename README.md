@@ -81,9 +81,7 @@ flowchart LR
 ### Run
 
 ```bash
-ROXY_PROXY_BIND=127.0.0.1:8080 \
-ROXY_API_BIND=127.0.0.1:3000 \
-ROXY_WS_BIND=127.0.0.1:3001 \
+ROXY_BIND=127.0.0.1:8080 \
 ROXY_DATA_DIR=.roxy-data \
 cargo run -p roxy
 ```
@@ -96,21 +94,19 @@ cargo run -p roxy -- --debug
 
 Open:
 
-- Web UI: `http://127.0.0.1:3000/`
-- API base: `http://127.0.0.1:3000/api/v1`
+- Web UI: `http://127.0.0.1:8080/`
+- API base: `http://127.0.0.1:8080/api/v1`
 
 Notes:
 
+- roxy runs on a single public port: one listener handles proxy traffic, API/UI, and WebSocket upgrade requests.
 - If a bind address is already in use, roxy increments port(s) until an available one is found.
-- The web client auto-detects WS default URL using the actual runtime WS port via `/api/v1/ws/stats`.
 
 ## Runtime Configuration
 
 | Env Var | Default | Description |
 |---|---|---|
-| `ROXY_PROXY_BIND` | `127.0.0.1:8080` | Proxy listener |
-| `ROXY_API_BIND` | `127.0.0.1:3000` | API/UI listener |
-| `ROXY_WS_BIND` | `127.0.0.1:3001` | WebSocket listener |
+| `ROXY_BIND` | `127.0.0.1:8080` | Public listener (proxy + API/UI + WS upgrade) |
 | `ROXY_DATA_DIR` | `.roxy-data` | Cert and storage root |
 | `ROXY_PLUGIN_DIR` | `./plugins` | Python plugin autoload directory |
 | `ROXY_DEBUG_LOGGING` | `false` | Enables extensive proxy debug logs |

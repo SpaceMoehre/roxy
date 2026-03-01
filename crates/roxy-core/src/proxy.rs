@@ -22,7 +22,7 @@ use reqwest::Client;
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, trace, warn};
@@ -85,6 +85,14 @@ impl ProxyEngine {
     }
 
     pub async fn run_with_shutdown(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+        self.run_with_shutdown_and_ready(&mut shutdown, None).await
+    }
+
+    pub async fn run_with_shutdown_and_ready(
+        self,
+        shutdown: &mut watch::Receiver<bool>,
+        ready: Option<oneshot::Sender<SocketAddr>>,
+    ) -> Result<()> {
         let listener_addr = find_available_bind(self.config.bind)
             .await
             .with_context(|| {
@@ -97,6 +105,9 @@ impl ProxyEngine {
             .await
             .with_context(|| format!("failed to bind proxy listener on {listener_addr}"))?;
         info!(requested_bind = %self.config.bind, actual_bind = %listener_addr, "proxy listener started");
+        if let Some(tx) = ready {
+            let _ = tx.send(listener_addr);
+        }
 
         let shared = Arc::new(self);
         loop {
@@ -122,7 +133,7 @@ impl ProxyEngine {
         Ok(())
     }
 
-    async fn serve_stream(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<()> {
+    pub async fn serve_stream(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<()> {
         let io = TokioIo::new(stream);
         let svc_engine = self.clone();
         let service = service_fn(move |req| {
