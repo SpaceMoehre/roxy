@@ -68,6 +68,8 @@ pub struct IntruderResult {
     pub status: Option<u16>,
     pub duration_ms: u128,
     pub response_size: usize,
+    pub request_blob: String,
+    pub response_blob: Option<String>,
     pub error: Option<String>,
 }
 
@@ -289,6 +291,8 @@ impl IntruderManager {
                     status: None,
                     duration_ms: 0,
                     response_size: 0,
+                    request_blob: String::new(),
+                    response_blob: None,
                     error: Some(format!("intruder worker join error: {err}")),
                 },
             };
@@ -308,16 +312,97 @@ impl IntruderManager {
     }
 }
 
-type PreparedRequest = ParsedRequestBlob;
+struct PreparedRequest {
+    parsed: ParsedRequestBlob,
+    request_blob: String,
+}
 
 fn build_attack_request(
     spec: &IntruderJobSpec,
     payloads: BTreeMap<String, String>,
 ) -> Result<PreparedRequest> {
-    let request_blob = render_template(&spec.request_blob_template, &payloads);
-    let default_scheme = spec.default_scheme.as_deref().unwrap_or("http");
-    parse_request_blob(request_blob.as_bytes(), default_scheme, None)
-        .context("invalid intruder request blob")
+    let rendered = render_template(&spec.request_blob_template, &payloads);
+    let marker_value = marker_payload_value(&payloads).map(String::as_str);
+    let request_blob = apply_section_markers(&rendered, marker_value)
+        .context("invalid § marker usage in intruder request blob")?;
+    let inferred_default_scheme = infer_default_scheme_from_request_blob(&request_blob);
+    let default_scheme = spec
+        .default_scheme
+        .as_deref()
+        .or(inferred_default_scheme)
+        .unwrap_or("http");
+    let parsed = parse_request_blob(request_blob.as_bytes(), default_scheme, None)
+        .context("invalid intruder request blob")?;
+    Ok(PreparedRequest {
+        parsed,
+        request_blob,
+    })
+}
+
+fn marker_payload_value(payloads: &BTreeMap<String, String>) -> Option<&String> {
+    payloads.get("marker").or_else(|| payloads.values().next())
+}
+
+fn apply_section_markers(template: &str, value: Option<&str>) -> Result<String> {
+    let marker_positions: Vec<usize> = template.match_indices('§').map(|(idx, _)| idx).collect();
+    if marker_positions.is_empty() {
+        return Ok(template.to_string());
+    }
+
+    if marker_positions.len() % 2 != 0 {
+        return Err(anyhow!("unmatched § marker in request template"));
+    }
+
+    let replacement =
+        value.ok_or_else(|| anyhow!("request template contains § markers but no payload value"))?;
+
+    let marker_len = '§'.len_utf8();
+    let mut out = String::with_capacity(template.len());
+    let mut cursor = 0usize;
+    for pair in marker_positions.chunks_exact(2) {
+        let start = pair[0];
+        let end = pair[1];
+        out.push_str(&template[cursor..start]);
+        out.push_str(replacement);
+        cursor = end + marker_len;
+    }
+    out.push_str(&template[cursor..]);
+    Ok(out)
+}
+
+fn infer_default_scheme_from_request_blob(request_blob: &str) -> Option<&'static str> {
+    let mut lines = request_blob.lines();
+    let request_line = lines.next()?.trim();
+    let target = request_line.split_whitespace().nth(1)?.trim();
+
+    if target.starts_with("https://") {
+        return Some("https");
+    }
+    if target.starts_with("http://") {
+        return Some("http");
+    }
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        let Some((name, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("host") {
+            continue;
+        }
+        let host_value = value.trim().to_ascii_lowercase();
+        if host_value.ends_with(":443") {
+            return Some("https");
+        }
+        if host_value.ends_with(":80") {
+            return Some("http");
+        }
+    }
+
+    None
 }
 
 async fn execute_attack(
@@ -327,33 +412,47 @@ async fn execute_attack(
     request: PreparedRequest,
 ) -> IntruderResult {
     let started = std::time::Instant::now();
-    let method = request.method.parse::<reqwest::Method>();
+    let method = request.parsed.method.parse::<reqwest::Method>();
+    let request_blob = request.request_blob;
 
     let response = async {
         let method = method.context("invalid HTTP method")?;
-        let mut builder = client.request(method, request.uri);
-        for h in request.headers {
+        let mut builder = client.request(method, request.parsed.uri.clone());
+        for h in request.parsed.headers {
             builder = builder.header(h.name, h.value);
         }
 
         let resp = builder
-            .body(request.body)
+            .body(request.parsed.body)
             .send()
             .await
             .context("request failed")?;
         let status = resp.status().as_u16();
+        let mut headers_text = String::new();
+        for (name, value) in resp.headers() {
+            if let Ok(v) = value.to_str() {
+                headers_text.push_str(name.as_str());
+                headers_text.push_str(": ");
+                headers_text.push_str(v);
+                headers_text.push_str("\r\n");
+            }
+        }
         let bytes = resp.bytes().await.context("response read failed")?;
-        Ok::<(u16, usize), anyhow::Error>((status, bytes.len()))
+        let body_text = String::from_utf8_lossy(&bytes);
+        let response_blob = format!("HTTP/1.1 {status}\r\n{headers_text}\r\n{body_text}");
+        Ok::<(u16, usize, String), anyhow::Error>((status, bytes.len(), response_blob))
     }
     .await;
 
     match response {
-        Ok((status, response_size)) => IntruderResult {
+        Ok((status, response_size, response_blob)) => IntruderResult {
             sequence,
             payloads,
             status: Some(status),
             duration_ms: started.elapsed().as_millis(),
             response_size,
+            request_blob,
+            response_blob: Some(response_blob),
             error: None,
         },
         Err(err) => IntruderResult {
@@ -362,6 +461,8 @@ async fn execute_attack(
             status: None,
             duration_ms: started.elapsed().as_millis(),
             response_size: 0,
+            request_blob,
+            response_blob: None,
             error: Some(err.to_string()),
         },
     }
@@ -494,5 +595,40 @@ mod tests {
 
         let rendered = render_template("https://{{host}}/a/{{id}}", &payloads);
         assert_eq!(rendered, "https://example.com/a/42");
+    }
+
+    #[test]
+    fn infers_scheme_from_absolute_target() {
+        let blob = "GET https://example.com/test HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let scheme = infer_default_scheme_from_request_blob(blob);
+        assert_eq!(scheme, Some("https"));
+    }
+
+    #[test]
+    fn infers_scheme_from_host_port() {
+        let blob = "GET /test HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        let scheme = infer_default_scheme_from_request_blob(blob);
+        assert_eq!(scheme, Some("https"));
+    }
+
+    #[test]
+    fn section_markers_replace_all_marked_parts() {
+        let template = "GET /?a=§old1§&b=§old2§ HTTP/1.1\r\nHost: tld\r\n\r\n";
+        let rendered = apply_section_markers(template, Some("777")).expect("render");
+        assert_eq!(rendered, "GET /?a=777&b=777 HTTP/1.1\r\nHost: tld\r\n\r\n");
+    }
+
+    #[test]
+    fn section_markers_require_matching_pairs() {
+        let template = "GET /?a=§old HTTP/1.1\r\nHost: tld\r\n\r\n";
+        let err = apply_section_markers(template, Some("x")).expect_err("must fail");
+        assert!(err.to_string().contains("unmatched"));
+    }
+
+    #[test]
+    fn section_markers_require_payload_value() {
+        let template = "GET /?a=§old§ HTTP/1.1\r\nHost: tld\r\n\r\n";
+        let err = apply_section_markers(template, None).expect_err("must fail");
+        assert!(err.to_string().contains("no payload value"));
     }
 }

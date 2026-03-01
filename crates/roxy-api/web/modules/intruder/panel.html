@@ -9,19 +9,50 @@
     <form id="intruder-form" class="stack">
       <label for="intruder-name">Name</label>
       <input id="intruder-name" value="quick-attack" />
-      <label for="intruder-default-scheme">Default Scheme (for origin-form targets)</label>
-      <select id="intruder-default-scheme">
-        <option value="http">http</option>
-        <option value="https">https</option>
-      </select>
       <label for="intruder-request-template">Request Blob Template</label>
-      <textarea id="intruder-request-template" rows="10">GET /item?id={{id}} HTTP/1.1
+      <textarea id="intruder-request-template" rows="10">GET https://target.tld/item?id=§1§ HTTP/1.1
 Host: target.tld
 Connection: close
 
 </textarea>
-      <label for="intruder-payloads">Payload Sets (JSON)</label>
-      <textarea id="intruder-payloads" rows="6">[{"key":"id","values":["1","2"]}]</textarea>
+      <div class="button-row">
+        <button type="button" id="intruder-mark-selection">Wrap selection with §...§</button>
+      </div>
+      <p class="hint">Mark replaceable request parts with <code>§...§</code>. All marked parts are replaced with each payload value.</p>
+      <label for="intruder-source-mode">Payload Source</label>
+      <select id="intruder-source-mode">
+        <option value="upload">Upload file</option>
+        <option value="url">URL to file</option>
+        <option value="numbers">Number generator</option>
+      </select>
+
+      <div id="intruder-source-upload" class="stack intruder-source-panel">
+        <label for="intruder-source-file">Upload payload file (one value per line)</label>
+        <input id="intruder-source-file" type="file" accept=".txt,.list,.lst,.csv,text/plain" />
+      </div>
+
+      <div id="intruder-source-url-wrap" class="stack intruder-source-panel" hidden>
+        <label for="intruder-source-url">File URL (one value per line)</label>
+        <input id="intruder-source-url" placeholder="https://example.com/wordlist.txt" />
+      </div>
+
+      <div id="intruder-source-numbers-wrap" class="stack intruder-source-panel" hidden>
+        <div class="intruder-generator-grid">
+          <label for="intruder-num-start">Start</label>
+          <input id="intruder-num-start" type="number" value="1" step="1" />
+          <label for="intruder-num-end">End (inclusive)</label>
+          <input id="intruder-num-end" type="number" value="100" step="1" />
+          <label for="intruder-num-step">Step</label>
+          <input id="intruder-num-step" type="number" value="1" step="1" />
+          <label for="intruder-num-pad">Zero pad width</label>
+          <input id="intruder-num-pad" type="number" value="0" min="0" step="1" />
+          <label for="intruder-num-prefix">Prefix</label>
+          <input id="intruder-num-prefix" value="" />
+          <label for="intruder-num-suffix">Suffix</label>
+          <input id="intruder-num-suffix" value="" />
+        </div>
+      </div>
+
       <label for="intruder-strategy">Strategy</label>
       <select id="intruder-strategy">
         <option value="cluster_bomb">cluster_bomb</option>
@@ -38,5 +69,11 @@ Connection: close
     <div id="intruder-jobs" class="scroll-list"></div>
     <h4>Selected Job Results</h4>
     <div id="intruder-results" class="scroll-list"></div>
+    <div id="intruder-result-detail" class="stack intruder-result-detail" hidden>
+      <h4>Selected Request</h4>
+      <pre id="intruder-result-request" class="output"></pre>
+      <h4>Selected Response</h4>
+      <pre id="intruder-result-response" class="output"></pre>
+    </div>
   </article>
 </div>

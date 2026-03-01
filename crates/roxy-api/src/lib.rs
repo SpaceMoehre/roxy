@@ -214,6 +214,16 @@ struct IntruderResultsQuery {
 }
 
 #[derive(Deserialize)]
+struct IntruderPayloadSourceFetchRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct IntruderPayloadSourceFetchResponse {
+    text: String,
+}
+
+#[derive(Deserialize)]
 struct IntruderPath {
     id: String,
 }
@@ -323,6 +333,10 @@ pub async fn run_api_with_shutdown_and_ready(
                             .route("/decoder/transform", web::post().to(decode_transform))
                             .route("/intruder/jobs", web::post().to(intruder_create_job))
                             .route("/intruder/jobs", web::get().to(intruder_list_jobs))
+                            .route(
+                                "/intruder/payload-source/fetch",
+                                web::post().to(intruder_fetch_payload_source),
+                            )
                             .route("/intruder/jobs/{id}", web::get().to(intruder_get_job))
                             .route(
                                 "/intruder/jobs/{id}/results",
@@ -442,6 +456,10 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                         .route("/decoder/transform", web::post().to(decode_transform))
                         .route("/intruder/jobs", web::post().to(intruder_create_job))
                         .route("/intruder/jobs", web::get().to(intruder_list_jobs))
+                        .route(
+                            "/intruder/payload-source/fetch",
+                            web::post().to(intruder_fetch_payload_source),
+                        )
                         .route("/intruder/jobs/{id}", web::get().to(intruder_get_job))
                         .route(
                             "/intruder/jobs/{id}/results",
@@ -1159,6 +1177,71 @@ async fn intruder_create_job(
 async fn intruder_list_jobs(state: web::types::State<ApiState>) -> HttpResponse {
     let rows = state.intruder.list_jobs().await;
     HttpResponse::Ok().json(&rows)
+}
+
+async fn intruder_fetch_payload_source(
+    _state: web::types::State<ApiState>,
+    req: web::types::Json<IntruderPayloadSourceFetchRequest>,
+) -> HttpResponse {
+    let url = req.url.trim();
+    let parsed_url = match reqwest::Url::parse(url) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
+        Ok(_) => {
+            return json_error(
+                HttpResponse::BadRequest(),
+                "payload source url must use http or https",
+            );
+        }
+        Err(err) => return json_error(HttpResponse::BadRequest(), &format!("invalid url: {err}")),
+    };
+
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return json_error(
+                HttpResponse::InternalServerError(),
+                &format!("failed to create fetch client: {err}"),
+            );
+        }
+    };
+
+    let response = match client.get(parsed_url).send().await {
+        Ok(response) => response,
+        Err(err) => return json_error(HttpResponse::BadGateway(), &format!("fetch failed: {err}")),
+    };
+
+    if !response.status().is_success() {
+        return json_error(
+            HttpResponse::BadGateway(),
+            &format!("source returned HTTP {}", response.status()),
+        );
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return json_error(
+                HttpResponse::BadGateway(),
+                &format!("failed reading source response: {err}"),
+            );
+        }
+    };
+
+    const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+    if bytes.len() > MAX_SOURCE_BYTES {
+        return json_error(
+            HttpResponse::BadRequest(),
+            "payload source too large (max 4 MiB)",
+        );
+    }
+
+    HttpResponse::Ok().json(&IntruderPayloadSourceFetchResponse {
+        text: String::from_utf8_lossy(&bytes).to_string(),
+    })
 }
 
 async fn intruder_get_job(

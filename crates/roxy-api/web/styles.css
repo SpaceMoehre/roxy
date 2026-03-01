@@ -716,6 +716,24 @@ button.warn {
   width: 90px;
 }
 
+.intruder-source-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+
+.intruder-generator-grid {
+  display: grid;
+  grid-template-columns: auto minmax(90px, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.intruder-result-detail {
+  margin-top: 7px;
+}
+
 .repeater-split {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -835,6 +853,10 @@ select:focus-visible,
   }
 
   .plugins-substitution-row {
+    grid-template-columns: 1fr;
+  }
+
+  .intruder-generator-grid {
     grid-template-columns: 1fr;
   }
 
