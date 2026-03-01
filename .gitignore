@@ -1,3 +1,5 @@
 /target
 /.roxy-data
 *.log
+__pycache__/
+*.pyc
