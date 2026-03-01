@@ -1236,6 +1236,26 @@ async function loadInterceptQueues() {
       api('/proxy/response-intercepts'),
     ]);
 
+    const selectedRequestId = appState.selectedRequest?.id;
+    const selectedResponseId = appState.selectedResponse?.request_id;
+
+    const nextSelectedRequest = requests.find((item) => item.id === selectedRequestId)
+      || requests[0]
+      || null;
+    const nextSelectedResponse = responses.find((item) => item.request_id === selectedResponseId)
+      || responses[0]
+      || null;
+
+    appState.selectedRequest = nextSelectedRequest;
+    appState.selectedResponse = nextSelectedResponse;
+
+    if (nextSelectedRequest) {
+      fillRequestForm(nextSelectedRequest);
+    }
+    if (nextSelectedResponse) {
+      fillResponseForm(nextSelectedResponse);
+    }
+
     renderList(
       'request-queue',
       requests,
@@ -1248,7 +1268,7 @@ async function loadInterceptQueues() {
         fillRequestForm(item);
         loadInterceptQueues();
       },
-      appState.selectedRequest?.id,
+      nextSelectedRequest?.id,
     );
 
     renderList(
@@ -1260,7 +1280,7 @@ async function loadInterceptQueues() {
         fillResponseForm(item);
         loadInterceptQueues();
       },
-      appState.selectedResponse?.request_id,
+      nextSelectedResponse?.request_id,
     );
   } catch (err) {
     toast(`Queue load failed: ${err.message}`);
