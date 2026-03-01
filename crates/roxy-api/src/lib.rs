@@ -1,3 +1,4 @@
+mod web_modules;
 pub mod ws;
 
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -16,14 +17,15 @@ use roxy_plugin::{PluginInvocation, PluginManager, PluginRegistration};
 use roxy_storage::StorageManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tera::{Context as TeraContext, Tera};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::ws::WsHub;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
+const INDEX_TEMPLATE: &str = include_str!("../web/templates/index.html.tera");
+const APP_TEMPLATE: &str = include_str!("../web/templates/app.js.tera");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 
 #[derive(Clone)]
@@ -34,6 +36,7 @@ pub struct ApiState {
     pub plugins: PluginManager,
     pub intruder: IntruderManager,
     pub ws_hub: WsHub,
+    pub ui_modules: Arc<web_modules::UiModuleRegistry>,
 }
 
 impl ApiState {
@@ -52,6 +55,7 @@ impl ApiState {
             plugins,
             intruder,
             ws_hub,
+            ui_modules: Arc::new(web_modules::UiModuleRegistry::with_builtin_modules()),
         }
     }
 }
@@ -300,16 +304,46 @@ pub async fn run_api_with_shutdown(
     }
 }
 
-async fn index() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(INDEX_HTML)
+fn render_index_html(state: &ApiState) -> Result<String> {
+    let mut context = TeraContext::new();
+    context.insert("modules", state.ui_modules.modules());
+    Tera::one_off(INDEX_TEMPLATE, &context, false).context("failed rendering index template")
 }
 
-async fn app_js() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("application/javascript; charset=utf-8")
-        .body(APP_JS)
+fn render_app_js(state: &ApiState) -> Result<String> {
+    let mut context = TeraContext::new();
+    context.insert("module_scripts", &state.ui_modules.module_scripts_bundle());
+    Tera::one_off(APP_TEMPLATE, &context, false).context("failed rendering app template")
+}
+
+async fn index(state: web::types::State<ApiState>) -> HttpResponse {
+    match render_index_html(&state) {
+        Ok(html) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(html),
+        Err(err) => {
+            error!(%err, "web ui html rendering failed");
+            json_error(
+                HttpResponse::InternalServerError(),
+                "failed rendering web ui",
+            )
+        }
+    }
+}
+
+async fn app_js(state: web::types::State<ApiState>) -> HttpResponse {
+    match render_app_js(&state) {
+        Ok(js) => HttpResponse::Ok()
+            .content_type("application/javascript; charset=utf-8")
+            .body(js),
+        Err(err) => {
+            error!(%err, "web ui script rendering failed");
+            json_error(
+                HttpResponse::InternalServerError(),
+                "failed rendering web ui script",
+            )
+        }
+    }
 }
 
 async fn styles_css() -> HttpResponse {

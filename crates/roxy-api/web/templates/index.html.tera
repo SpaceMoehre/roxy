@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Roxy Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
+    <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="chrome" aria-label="Workspace controls">
+        <nav class="tabbar" aria-label="Main sections">
+          <button class="tab active" data-tab="target">Target</button>
+          <button class="tab" data-tab="proxy">Proxy</button>
+          {% for module in modules %}
+          <button class="tab" data-tab="{{ module.id }}">{{ module.title }}</button>
+          {% endfor %}
+          <button class="tab" data-tab="settings">Settings</button>
+        </nav>
+        <div class="chrome-tools">
+          <div class="health-wrap">
+            <span class="health-dot" id="health-dot" aria-hidden="true"></span>
+            <span id="health-label">Connecting...</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout" id="layout-root">
+        <section class="panel active" id="tab-target">
+          <div class="panel-head">
+            <h2>Target Scope & Site Map</h2>
+            <button id="refresh-site-map">Refresh</button>
+          </div>
+          <div class="split-grid">
+            <article class="card">
+              <h3>Site Map</h3>
+              <form id="scope-form" class="stack scope-form">
+                <label for="scope-host">Add Scope Host (exact or wildcard: *.example.com)</label>
+                <input id="scope-host" placeholder="*.target.tld" />
+                <div class="button-row">
+                  <button type="submit">Add To Scope</button>
+                  <button type="button" class="warn" id="scope-clear">Clear Scope</button>
+                </div>
+              </form>
+              <div id="scope-list" class="scroll-list scope-list-compact"></div>
+              <div id="site-map" class="scroll-list" aria-live="polite"></div>
+            </article>
+            <article class="card">
+              <h3>History Search</h3>
+              <form id="history-form" class="stack">
+                <label for="history-q">Query</label>
+                <input id="history-q" placeholder="method, path, body token..." />
+                <button type="submit">Search</button>
+              </form>
+              <div id="history-results" class="scroll-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="tab-proxy">
+          <div class="panel-head">
+            <h2>Proxy Interception</h2>
+            <button id="refresh-proxy">Refresh Queues</button>
+          </div>
+
+          <div class="proxy-subtabs">
+            <button class="proxy-subtab active" data-proxy-tab="intercept">Intercept Queue</button>
+            <button class="proxy-subtab" data-proxy-tab="history">Proxy History</button>
+          </div>
+
+          <div class="proxy-subpanel active" id="proxy-subpanel-intercept">
+            <div class="toggle-row card compact">
+              <label><input type="checkbox" id="toggle-intercept" /> Intercept Requests</label>
+              <label><input type="checkbox" id="toggle-intercept-response" /> Intercept Responses</label>
+              <label><input type="checkbox" id="toggle-mitm" /> MITM Enabled</label>
+            </div>
+
+            <div class="split-grid">
+              <article class="card">
+                <h3>Pending Requests</h3>
+                <div class="queue-layout">
+                  <ul id="request-queue" class="queue"></ul>
+                  <form id="request-action-form" class="stack">
+                    <label for="request-blob">Raw Request (blob)</label>
+                    <textarea id="request-blob" rows="16"></textarea>
+                    <div class="button-row">
+                      <button type="button" id="request-forward">Forward</button>
+                      <button type="button" class="warn" id="request-drop">Drop</button>
+                      <button type="button" class="accent" id="request-mutate">Mutate & Send</button>
+                    </div>
+                  </form>
+                </div>
+              </article>
+
+              <article class="card">
+                <h3>Pending Responses</h3>
+                <div class="queue-layout">
+                  <ul id="response-queue" class="queue"></ul>
+                  <form id="response-action-form" class="stack">
+                    <label for="response-status">Status</label>
+                    <input id="response-status" type="number" min="100" max="599" />
+                    <label for="response-headers">Headers (name: value per line)</label>
+                    <textarea id="response-headers" rows="5"></textarea>
+                    <label for="response-body">Body</label>
+                    <textarea id="response-body" rows="6"></textarea>
+                    <div class="button-row">
+                      <button type="button" id="response-forward">Forward</button>
+                      <button type="button" class="warn" id="response-drop">Drop</button>
+                      <button type="button" class="accent" id="response-mutate">Mutate & Send</button>
+                    </div>
+                  </form>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <div class="proxy-subpanel" id="proxy-subpanel-history">
+            <article class="card">
+              <div class="panel-head">
+                <h3>All Captured Requests</h3>
+                <button id="refresh-proxy-history">Refresh History</button>
+              </div>
+              <div class="proxy-history-layout">
+                <div class="proxy-history-upper">
+                  <div id="proxy-history-list" class="scroll-list"></div>
+                </div>
+                <div class="proxy-history-lower">
+                  <div class="proxy-history-toolbar">
+                    <div id="proxy-history-meta" class="status">No request selected</div>
+                    <div class="proxy-history-mode-buttons" aria-label="Proxy history view mode">
+                      <button type="button" class="history-mode-btn" id="proxy-history-mode-request" data-history-mode="request" aria-label="Show request">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 5h16M4 9h10M4 13h16M4 17h8"></path>
+                        </svg>
+                      </button>
+                      <button type="button" class="history-mode-btn active" id="proxy-history-mode-both" data-history-mode="both" aria-label="Show request and response">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 7h16M4 11h16"></path>
+                          <path d="M7 16h10M12 16v4"></path>
+                        </svg>
+                      </button>
+                      <button type="button" class="history-mode-btn" id="proxy-history-mode-response" data-history-mode="response" aria-label="Show response">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 7h8M4 11h16M4 15h8M14 7l6 4-6 4"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div id="proxy-history-empty" class="scroll-item">Select a request from the list above.</div>
+                  <div id="proxy-history-request-wrap" class="proxy-history-pane">
+                    <h4>Request</h4>
+                    <pre id="proxy-history-request" class="output"></pre>
+                  </div>
+                  <div id="proxy-history-response-wrap" class="proxy-history-pane">
+                    <h4>Response</h4>
+                    <pre id="proxy-history-response" class="output"></pre>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        {% for module in modules %}
+        <section class="panel" id="tab-{{ module.id }}">
+          {{ module.panel_html | safe }}
+        </section>
+        {% endfor %}
+
+        <section class="panel" id="tab-settings">
+          <div class="panel-head">
+            <h2>Proxy Settings</h2>
+          </div>
+          <article class="card">
+            <div class="stack scope-form">
+              <h3>Interface</h3>
+              <form id="ui-settings-form" class="stack">
+                <label for="theme-preference">Theme mode</label>
+                <select id="theme-preference">
+                  <option value="auto">Auto (system)</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+                <button type="submit" class="accent">Save UI Settings</button>
+              </form>
+              <div id="settings-status" class="status">Settings are stored in your browser.</div>
+            </div>
+          </article>
+
+          <div class="split-grid module-settings-grid">
+            {% for module in modules %}
+            <article class="card module-settings-card" data-module="{{ module.id }}">
+              {{ module.settings_html | safe }}
+            </article>
+            {% endfor %}
+          </div>
+
+          <article class="card">
+            <h3>Certificate Authority</h3>
+            <div class="button-row">
+              <a href="/api/v1/proxy/settings/ca.der" download="roxy-ca.der" class="button-link">Download CA (.der)</a>
+              <button id="regenerate-ca" class="warn">Regenerate CA</button>
+            </div>
+            <p class="hint">
+              After regenerating CA, re-import the cert in your local trust store and restart apps using the proxy.
+            </p>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

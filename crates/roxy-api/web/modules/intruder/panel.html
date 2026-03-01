@@ -1,0 +1,42 @@
+<div class="panel-head">
+  <h2>Intruder</h2>
+  <button id="refresh-intruder">Refresh Jobs</button>
+</div>
+
+<div class="split-grid">
+  <article class="card">
+    <h3>Create Attack Job</h3>
+    <form id="intruder-form" class="stack">
+      <label for="intruder-name">Name</label>
+      <input id="intruder-name" value="quick-attack" />
+      <label for="intruder-default-scheme">Default Scheme (for origin-form targets)</label>
+      <select id="intruder-default-scheme">
+        <option value="http">http</option>
+        <option value="https">https</option>
+      </select>
+      <label for="intruder-request-template">Request Blob Template</label>
+      <textarea id="intruder-request-template" rows="10">GET /item?id={{id}} HTTP/1.1
+Host: target.tld
+Connection: close
+
+</textarea>
+      <label for="intruder-payloads">Payload Sets (JSON)</label>
+      <textarea id="intruder-payloads" rows="6">[{"key":"id","values":["1","2"]}]</textarea>
+      <label for="intruder-strategy">Strategy</label>
+      <select id="intruder-strategy">
+        <option value="cluster_bomb">cluster_bomb</option>
+        <option value="sniper">sniper</option>
+      </select>
+      <label for="intruder-concurrency">Concurrency</label>
+      <input id="intruder-concurrency" type="number" value="16" min="1" max="256" />
+      <button type="submit" class="accent">Launch Job</button>
+    </form>
+  </article>
+
+  <article class="card">
+    <h3>Jobs & Results</h3>
+    <div id="intruder-jobs" class="scroll-list"></div>
+    <h4>Selected Job Results</h4>
+    <div id="intruder-results" class="scroll-list"></div>
+  </article>
+</div>

@@ -1,0 +1,17 @@
+<div class="panel-head">
+  <h2>Decoder</h2>
+</div>
+<article class="card">
+  <form id="decoder-form" class="stack">
+    <label for="decoder-mode">Mode</label>
+    <select id="decoder-mode">
+      <option value="base64_encode">base64_encode</option>
+      <option value="base64_decode">base64_decode</option>
+      <option value="plugin:custom">plugin:custom</option>
+    </select>
+    <label for="decoder-input">Input</label>
+    <textarea id="decoder-input" rows="8"></textarea>
+    <button type="submit" class="accent">Transform</button>
+  </form>
+  <pre id="decoder-output" class="output"></pre>
+</article>
