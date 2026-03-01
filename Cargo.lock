@@ -2355,7 +2355,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "brotli",
  "bytes",
+ "flate2",
  "futures-util",
  "ntex",
  "reqwest",
@@ -2370,6 +2372,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

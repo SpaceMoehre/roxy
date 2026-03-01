@@ -272,6 +272,7 @@
       </main>
     </div>
 
+    <div id="request-context-menu" class="context-menu" role="menu" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script src="/app.js" defer></script>

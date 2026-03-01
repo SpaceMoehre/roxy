@@ -3,12 +3,13 @@ pub mod ws;
 
 use std::{
     io,
+    io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use ntex::web::{self, HttpResponse};
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tera::{Context as TeraContext, Tera};
 use tokio::sync::{oneshot, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::ws::WsHub;
@@ -952,26 +953,142 @@ async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
         .await
         .context("repeater request failed")?;
     let status = response.status().as_u16();
-    let headers = response
-        .headers()
+    let headers_map = response.headers().clone();
+    let content_encoding = content_encoding_from_headers(&headers_map);
+    let encoded_body_bytes = response
+        .bytes()
+        .await
+        .context("failed reading repeater response")?;
+    let mut response_decoded = false;
+    let body_bytes =
+        match decode_http_body_bytes(encoded_body_bytes.as_ref(), content_encoding.as_deref()) {
+            Ok(decoded) => {
+                response_decoded = true;
+                decoded
+            }
+            Err(err) => {
+                warn!(
+                    %err,
+                    encoding = ?content_encoding,
+                    "failed decoding repeater response body; preserving original bytes"
+                );
+                encoded_body_bytes.to_vec()
+            }
+        };
+
+    let headers = headers_map
         .iter()
         .filter_map(|(name, value)| {
+            if name.as_str().eq_ignore_ascii_case("content-length")
+                || name.as_str().eq_ignore_ascii_case("transfer-encoding")
+            {
+                return None;
+            }
+            if response_decoded && name.as_str().eq_ignore_ascii_case("content-encoding") {
+                return None;
+            }
             value.to_str().ok().map(|v| HeaderValuePair {
                 name: name.to_string(),
                 value: v.to_string(),
             })
         })
         .collect();
-
-    let body_bytes = response
-        .bytes()
-        .await
-        .context("failed reading repeater response")?;
     Ok(RepeaterResponse {
         status,
         headers,
         body_base64: STANDARD.encode(body_bytes),
     })
+}
+
+fn content_encoding_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn decode_http_body_bytes(body: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>> {
+    let Some(content_encoding) = content_encoding else {
+        return Ok(match maybe_decode_http_body_by_magic(body)? {
+            Some(decoded) => decoded,
+            None => body.to_vec(),
+        });
+    };
+
+    let mut decoded = body.to_vec();
+    let encodings: Vec<String> = content_encoding
+        .split(',')
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty() && v != "identity")
+        .collect();
+
+    for encoding in encodings.iter().rev() {
+        decoded = match encoding.as_str() {
+            "gzip" | "x-gzip" => {
+                let mut decoder = flate2::read::GzDecoder::new(decoded.as_slice());
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .context("failed decoding gzip body")?;
+                out
+            }
+            "deflate" => {
+                let mut out = Vec::new();
+                let zlib_attempt = {
+                    let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice());
+                    decoder.read_to_end(&mut out)
+                };
+                if zlib_attempt.is_ok() {
+                    out
+                } else {
+                    let mut raw_out = Vec::new();
+                    let mut decoder = flate2::read::DeflateDecoder::new(decoded.as_slice());
+                    decoder
+                        .read_to_end(&mut raw_out)
+                        .context("failed decoding deflate body")?;
+                    raw_out
+                }
+            }
+            "br" => {
+                let mut decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .context("failed decoding brotli body")?;
+                out
+            }
+            "zstd" | "x-zstd" => {
+                zstd::stream::decode_all(decoded.as_slice()).context("failed decoding zstd body")?
+            }
+            unknown => {
+                return Err(anyhow!(
+                    "unsupported content-encoding '{unknown}' while decoding repeater response"
+                ));
+            }
+        };
+    }
+
+    Ok(decoded)
+}
+
+fn maybe_decode_http_body_by_magic(body: &[u8]) -> Result<Option<Vec<u8>>> {
+    if body.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::GzDecoder::new(body);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .context("failed decoding gzip body by magic header")?;
+        return Ok(Some(out));
+    }
+
+    if body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        let out =
+            zstd::stream::decode_all(body).context("failed decoding zstd body by magic header")?;
+        return Ok(Some(out));
+    }
+
+    Ok(None)
 }
 
 async fn decode_transform(
@@ -1293,6 +1410,7 @@ fn json_error(mut builder: ntex::http::ResponseBuilder, msg: &str) -> HttpRespon
 mod tests {
     use super::*;
     use roxy_core::AppState;
+    use std::io::Write;
 
     #[test]
     fn parses_forward_decision() {
@@ -1372,5 +1490,25 @@ mod tests {
             summary: "changed".to_string(),
         };
         assert_eq!(sample.plugin, "demo");
+    }
+
+    #[test]
+    fn repeater_decodes_gzip_body_from_header() {
+        let input = b"{\"hello\":\"world\"}";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(input).expect("write");
+        let encoded = encoder.finish().expect("finish");
+
+        let decoded = decode_http_body_bytes(&encoded, Some("gzip")).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn repeater_decodes_zstd_body_from_magic_without_header() {
+        let input = b"{\"kind\":\"zstd\"}";
+        let encoded = zstd::stream::encode_all(input.as_slice(), 1).expect("encode");
+
+        let decoded = decode_http_body_bytes(&encoded, None).expect("decode");
+        assert_eq!(decoded, input);
     }
 }

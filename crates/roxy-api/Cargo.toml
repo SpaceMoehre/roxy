@@ -18,6 +18,9 @@ bytes.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
 futures-util = "0.3"
+brotli.workspace = true
+flate2.workspace = true
+zstd.workspace = true
 roxy-core = { path = "../roxy-core" }
 roxy-storage = { path = "../roxy-storage" }
 roxy-plugin = { path = "../roxy-plugin" }

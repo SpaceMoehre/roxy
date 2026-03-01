@@ -237,6 +237,7 @@ function renderTabs() {
 
 function activateTab(tabName) {
   closePluginsTopMenu();
+  closeRequestContextMenu();
   const tabs = Array.from(document.querySelectorAll('.tab'));
   const panels = Array.from(document.querySelectorAll('.panel'));
   for (const t of tabs) t.classList.remove('active');
@@ -459,6 +460,292 @@ function responseBlobText(response) {
   return `${head}\r\n${headerBlock}\r\n${body}`;
 }
 
+function shellQuote(value) {
+  const text = String(value ?? '');
+  return `'${text.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function requestAbsoluteUrl(request) {
+  const uri = String(request?.uri || '').trim();
+  const method = String(request?.method || 'GET').toUpperCase();
+  const host = String(request?.host || '').trim();
+
+  if (!uri) {
+    return host ? `http://${host}/` : '';
+  }
+  if (/^https?:\/\//i.test(uri)) {
+    return uri;
+  }
+  if (method === 'CONNECT') {
+    return `https://${uri}`;
+  }
+  if (uri.startsWith('//')) {
+    return `http:${uri}`;
+  }
+  if (!host) {
+    return uri;
+  }
+  const normalizedPath = uri.startsWith('/') ? uri : `/${uri}`;
+  return `http://${host}${normalizedPath}`;
+}
+
+function requestHostForScope(request) {
+  const direct = String(request?.host || '').trim();
+  if (direct) {
+    return direct;
+  }
+  try {
+    const url = requestAbsoluteUrl(request);
+    return url ? new URL(url).host : '';
+  } catch {
+    return '';
+  }
+}
+
+function requestPluginPayload(request) {
+  const rawText = requestBlobText(request);
+  const bodyText = decodeBodyField(request?.body);
+  return {
+    request: {
+      id: request?.id || '',
+      method: request?.method || 'GET',
+      uri: request?.uri || '',
+      host: request?.host || '',
+      headers: Array.isArray(request?.headers) ? request.headers : [],
+      raw_text: rawText,
+      raw_base64: encodeBody(rawText),
+      body_base64: encodeBody(bodyText),
+    },
+    source: 'proxy_history_context',
+  };
+}
+
+function requestToCurl(request) {
+  const method = String(request?.method || 'GET').toUpperCase();
+  const url = requestAbsoluteUrl(request) || String(request?.uri || '/');
+  const parts = [`curl -X ${shellQuote(method)} ${shellQuote(url)}`];
+
+  const headers = Array.isArray(request?.headers) ? request.headers : [];
+  for (const header of headers) {
+    const name = String(header?.name || '').trim();
+    if (!name) {
+      continue;
+    }
+    const value = String(header?.value || '');
+    parts.push(`-H ${shellQuote(`${name}: ${value}`)}`);
+  }
+
+  const body = decodeBodyField(request?.body);
+  if (body) {
+    parts.push(`--data-binary ${shellQuote(body)}`);
+  }
+
+  return parts.join(' ');
+}
+
+async function copyTextToClipboard(text) {
+  const normalized = String(text ?? '');
+  if (!normalized) {
+    throw new Error('nothing to copy');
+  }
+
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(normalized);
+    return;
+  }
+
+  const ta = document.createElement('textarea');
+  ta.value = normalized;
+  ta.setAttribute('readonly', 'readonly');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  ta.style.pointerEvents = 'none';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) {
+    throw new Error('clipboard write failed');
+  }
+}
+
+function sendRequestToIntruder(request) {
+  const intruderName = qs('intruder-name');
+  const intruderTemplate = qs('intruder-request-template');
+  if (!intruderName || !intruderTemplate) {
+    toast('Intruder module is not available');
+    return;
+  }
+  intruderName.value = `from-history-${String(request?.id || '').slice(0, 8) || 'request'}`;
+  intruderTemplate.value = requestBlobText(request);
+  activateTab('intruder');
+  toast('Request sent to Intruder form');
+}
+
+function sendRequestToRepeater(request) {
+  const repeaterRequest = qs('repeater-request');
+  if (!repeaterRequest) {
+    toast('Repeater module is not available');
+    return;
+  }
+  repeaterRequest.value = requestBlobText(request);
+  activateTab('repeater');
+  toast('Request sent to Repeater form');
+}
+
+function requestPluginHook(plugin) {
+  if (!plugin || !Array.isArray(plugin.hooks)) {
+    return null;
+  }
+  const hooks = plugin.hooks.map((hook) => String(hook));
+  for (const hook of ['on_context_request', 'on_request_pre_capture', 'on_request', 'request']) {
+    if (hooks.includes(hook)) {
+      return hook;
+    }
+  }
+  return null;
+}
+
+function requestCapablePlugins(plugins) {
+  if (!Array.isArray(plugins)) {
+    return [];
+  }
+  return plugins
+    .map((plugin) => ({ plugin, hook: requestPluginHook(plugin) }))
+    .filter((row) => row.hook && row.plugin?.name);
+}
+
+function closeRequestContextMenu() {
+  const menu = qs('request-context-menu');
+  if (menu) {
+    menu.hidden = true;
+    menu.innerHTML = '';
+  }
+}
+
+function addRequestContextMenuGroup(menu, label) {
+  const group = document.createElement('div');
+  group.className = 'context-menu-group';
+  group.textContent = label;
+  menu.appendChild(group);
+}
+
+function addRequestContextMenuSeparator(menu) {
+  const sep = document.createElement('hr');
+  sep.className = 'context-menu-separator';
+  menu.appendChild(sep);
+}
+
+function addRequestContextMenuItem(menu, label, onSelect, disabled = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'context-menu-item';
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener('click', async () => {
+    closeRequestContextMenu();
+    if (disabled) {
+      return;
+    }
+    try {
+      await onSelect();
+    } catch (err) {
+      toast(`Action failed: ${err.message}`);
+    }
+  });
+  menu.appendChild(button);
+}
+
+function positionRequestContextMenu(menu, x, y) {
+  menu.style.left = `${Math.max(0, x)}px`;
+  menu.style.top = `${Math.max(0, y)}px`;
+
+  const rect = menu.getBoundingClientRect();
+  let left = x;
+  let top = y;
+  const maxLeft = window.innerWidth - rect.width - 8;
+  const maxTop = window.innerHeight - rect.height - 8;
+  left = Math.min(Math.max(8, left), Math.max(8, maxLeft));
+  top = Math.min(Math.max(8, top), Math.max(8, maxTop));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+async function openRequestContextMenu(event, request) {
+  const menu = qs('request-context-menu');
+  if (!menu) {
+    return;
+  }
+
+  closeRequestContextMenu();
+
+  const url = requestAbsoluteUrl(request);
+  const scopeHost = requestHostForScope(request);
+
+  addRequestContextMenuItem(menu, 'Add to Scope', async () => {
+    if (!scopeHost) {
+      throw new Error('request has no host');
+    }
+    await api('/target/scope', {
+      method: 'POST',
+      body: JSON.stringify({ host: scopeHost }),
+    });
+    await Promise.all([loadScope(), loadSiteMap()]);
+    toast(`Scope added: ${scopeHost}`);
+  }, !scopeHost);
+
+  addRequestContextMenuItem(menu, 'Send to Intruder', () => {
+    sendRequestToIntruder(request);
+  });
+
+  addRequestContextMenuItem(menu, 'Send to Repeater', () => {
+    sendRequestToRepeater(request);
+  });
+
+  addRequestContextMenuSeparator(menu);
+
+  addRequestContextMenuItem(menu, 'Copy URL', async () => {
+    if (!url) {
+      throw new Error('request url unavailable');
+    }
+    await copyTextToClipboard(url);
+    toast('URL copied');
+  }, !url);
+
+  addRequestContextMenuItem(menu, 'Copy as cURL command', async () => {
+    await copyTextToClipboard(requestToCurl(request));
+    toast('cURL command copied');
+  });
+
+  let plugins = [];
+  try {
+    plugins = await api('/plugins');
+  } catch {
+    plugins = [];
+  }
+  const requestPlugins = requestCapablePlugins(plugins);
+  if (requestPlugins.length > 0) {
+    addRequestContextMenuSeparator(menu);
+    addRequestContextMenuGroup(menu, 'Send to Plugin');
+    for (const row of requestPlugins) {
+      addRequestContextMenuItem(menu, row.plugin.name, async () => {
+        await api(`/plugins/${encodeURIComponent(row.plugin.name)}/invoke`, {
+          method: 'POST',
+          body: JSON.stringify({
+            hook: row.hook,
+            payload: requestPluginPayload(request),
+          }),
+        });
+        toast(`Request sent to plugin: ${row.plugin.name}`);
+      });
+    }
+  }
+
+  menu.hidden = false;
+  positionRequestContextMenu(menu, event.clientX, event.clientY);
+}
+
 function setProxyHistoryMode(mode) {
   if (!['request', 'response', 'both'].includes(mode)) {
     return;
@@ -504,24 +791,12 @@ function renderProxyHistoryList() {
     });
 
     item.addEventListener('dblclick', () => {
-      const repeaterRequest = qs('repeater-request');
-      if (repeaterRequest) {
-        repeaterRequest.value = requestBlobText(req);
-        activateTab('repeater');
-        toast('Request sent to Repeater form');
-      }
+      sendRequestToRepeater(req);
     });
 
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
-      const intruderName = qs('intruder-name');
-      const intruderTemplate = qs('intruder-request-template');
-      if (intruderName && intruderTemplate) {
-        intruderName.value = `from-history-${req.id.slice(0, 8)}`;
-        intruderTemplate.value = requestBlobText(req);
-        activateTab('intruder');
-        toast('Request sent to Intruder form');
-      }
+      void openRequestContextMenu(event, req);
     });
 
     root.appendChild(item);
@@ -576,23 +851,11 @@ function renderHistoryRows(root, rows, emptyText) {
       <small>${req.host} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms</small>
     `;
     item.addEventListener('click', () => {
-      const repeaterRequest = qs('repeater-request');
-      if (repeaterRequest) {
-        repeaterRequest.value = requestBlobText(req);
-        activateTab('repeater');
-        toast('Request sent to Repeater form');
-      }
+      sendRequestToRepeater(req);
     });
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
-      const intruderName = qs('intruder-name');
-      const intruderTemplate = qs('intruder-request-template');
-      if (intruderName && intruderTemplate) {
-        intruderName.value = `from-history-${req.id.slice(0, 8)}`;
-        intruderTemplate.value = requestBlobText(req);
-        activateTab('intruder');
-        toast('Request sent to Intruder form');
-      }
+      void openRequestContextMenu(event, req);
     });
     root.appendChild(item);
   }
@@ -1127,12 +1390,17 @@ function bindEvents() {
   qs('setting-upstream-max-chain-length').addEventListener('change', scheduleUpstreamProxySettingsSave);
 
   document.addEventListener('click', (event) => {
+    const requestMenu = qs('request-context-menu');
+    const target = event.target;
+    if (requestMenu && !requestMenu.hidden && !requestMenu.contains(target)) {
+      closeRequestContextMenu();
+    }
+
     const menu = qs('plugins-tab-menu');
     const anchor = pluginTabButton();
     if (!menu || menu.hidden) {
       return;
     }
-    const target = event.target;
     if (menu.contains(target) || (anchor && anchor.contains(target))) {
       return;
     }
@@ -1140,6 +1408,7 @@ function bindEvents() {
   });
 
   window.addEventListener('resize', () => {
+    closeRequestContextMenu();
     const menu = qs('plugins-tab-menu');
     if (menu && !menu.hidden) {
       positionPluginsTopMenu();
@@ -1148,6 +1417,7 @@ function bindEvents() {
 
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      closeRequestContextMenu();
       closePluginsTopMenu();
     }
   });

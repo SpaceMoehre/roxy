@@ -1,20 +1,37 @@
 <div class="panel-head">
   <h2>Repeater</h2>
 </div>
-<article class="card">
+<article class="card repeater-card">
   <form id="repeater-form" class="stack">
-    <label for="repeater-default-scheme">Default Scheme (for origin-form targets)</label>
-    <select id="repeater-default-scheme">
-      <option value="http">http</option>
-      <option value="https">https</option>
-    </select>
-    <label for="repeater-request">Raw Request (blob)</label>
-    <textarea id="repeater-request" rows="14">GET / HTTP/1.1
+    <div class="repeater-toolbar">
+      <div class="repeater-history-controls">
+        <button type="button" id="repeater-history-prev" aria-label="Previous repeater entry">&lt;</button>
+        <button type="button" id="repeater-history-next" aria-label="Next repeater entry">&gt;</button>
+        <span id="repeater-history-index" class="status">0 / 0</span>
+      </div>
+      <div class="repeater-send-controls">
+        <label for="repeater-default-scheme">Default Scheme</label>
+        <select id="repeater-default-scheme">
+          <option value="http">http</option>
+          <option value="https">https</option>
+        </select>
+        <button type="submit" class="accent">Send</button>
+      </div>
+    </div>
+
+    <div class="repeater-split">
+      <div class="repeater-pane">
+        <label for="repeater-request">Request (blob)</label>
+        <textarea id="repeater-request" rows="14">GET / HTTP/1.1
 Host: 127.0.0.1:8080
 Connection: close
 
 </textarea>
-    <button type="submit" class="accent">Send</button>
+      </div>
+      <div class="repeater-pane">
+        <label for="repeater-output">Response (blob)</label>
+        <pre id="repeater-output" class="output">No response yet.</pre>
+      </div>
+    </div>
   </form>
-  <pre id="repeater-output" class="output"></pre>
 </article>
