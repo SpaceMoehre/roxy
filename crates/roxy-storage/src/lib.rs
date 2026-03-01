@@ -164,12 +164,20 @@ impl StorageManager {
                 self.inner.fields.response_body,
             ],
         );
-        // Use lenient parsing for user-entered history queries so parser syntax
-        // characters (for example `:` in `a:b`) do not hard-fail with 400.
-        let (query, _parse_errors) = parser.parse_query_lenient(query);
-        let docs = searcher
-            .search(&query, &TopDocs::with_limit(limit))
+        // Primary: lenient parsing keeps search resilient.
+        // Fallback: when special parser chars are present (e.g. `:`), retry as a quoted
+        // literal phrase so input like `bn:t` is treated as plain text.
+        let (parsed_query, parse_errors) = parser.parse_query_lenient(query);
+        let mut docs = searcher
+            .search(&parsed_query, &TopDocs::with_limit(limit))
             .context("tantivy search failed")?;
+        if docs.is_empty() && (!parse_errors.is_empty() || query_requires_literal_fallback(query)) {
+            let literal_query = quote_for_phrase_query(query);
+            let (literal_parsed, _literal_errors) = parser.parse_query_lenient(&literal_query);
+            docs = searcher
+                .search(&literal_parsed, &TopDocs::with_limit(limit))
+                .context("tantivy search failed")?;
+        }
 
         let mut hits = Vec::new();
         for (_score, addr) in docs {
@@ -232,6 +240,39 @@ fn build_response_blob_text(response: &roxy_core::model::CapturedResponse) -> St
     blob.push_str("\r\n");
     blob.push_str(&String::from_utf8_lossy(response.body.as_ref()));
     blob
+}
+
+fn query_requires_literal_fallback(query: &str) -> bool {
+    query.chars().any(|c| {
+        matches!(
+            c,
+            ':' | '+'
+                | '-'
+                | '!'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '^'
+                | '"'
+                | '~'
+                | '*'
+                | '?'
+                | '\\'
+                | '/'
+                | '|'
+                | '&'
+        )
+    })
+}
+
+fn quote_for_phrase_query(query: &str) -> String {
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn open_or_create_index(path: &Path) -> Result<(Index, SearchFields)> {
@@ -358,6 +399,32 @@ mod tests {
 
         let hits = manager.search("a:b", 10).expect("search should not fail");
         assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_finds_colon_literal_present_in_response_blob() {
+        let tmp = TempDir::new().expect("tmp");
+        let manager = StorageManager::open(tmp.path()).expect("storage");
+        let mut exchange = fake_exchange();
+        exchange.response = Some(CapturedResponse {
+            request_id: exchange.request.id,
+            created_at_unix_ms: now_unix_ms(),
+            status: 200,
+            headers: vec![HeaderValuePair {
+                name: "x-debug-tag".to_string(),
+                value: "bn:t".to_string(),
+            }],
+            body: Bytes::from_static(br#"{"marker":"bn:t"}"#),
+        });
+
+        manager
+            .persist_exchange(&exchange)
+            .await
+            .expect("persist exchange");
+
+        let hits = manager.search("bn:t", 10).expect("search should not fail");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].exchange.request.id, exchange.request.id);
     }
 
     #[tokio::test]

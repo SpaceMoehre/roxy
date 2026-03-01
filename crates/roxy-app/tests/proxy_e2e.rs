@@ -640,6 +640,88 @@ async fn single_port_history_search_query_with_colon_is_accepted() {
     assert_eq!(response.status().as_u16(), 200);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local socket permissions in test environment"]
+async fn single_port_history_search_finds_colon_literal_from_response_blob() {
+    let (upstream_addr, upstream_shutdown, upstream_task) = start_custom_upstream(
+        200,
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        br#"{"marker":"bn:t"}"#.to_vec(),
+    )
+    .await;
+
+    let ingress_port = reserve_port();
+    let data_dir = TempDir::new().expect("temp dir");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
+    child
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
+        .env("ROXY_DATA_DIR", data_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = child.spawn().expect("failed to spawn roxy");
+    let _child_guard = ChildGuard::new(child);
+
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
+    let api_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("api client");
+    wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
+
+    let proxy_client = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{ingress_port}")).expect("proxy config"))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("proxy client");
+
+    let target_url = format!("http://{upstream_addr}/search-colon");
+    let response = proxy_client
+        .get(target_url.clone())
+        .send()
+        .await
+        .expect("proxy request");
+    assert!(response.status().is_success());
+    let _ = response.text().await.expect("response body");
+
+    wait_for(Duration::from_secs(10), || {
+        let api_client = api_client.clone();
+        let api_base = api_base.clone();
+        let target_url = target_url.clone();
+        async move {
+            let response = match api_client
+                .get(format!("{api_base}/history/search?q=bn:t&limit=100"))
+                .send()
+                .await
+            {
+                Ok(row) => row,
+                Err(_) => return false,
+            };
+            if !response.status().is_success() {
+                return false;
+            }
+            let payload: Value = match response.json().await {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            payload.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("exchange")
+                        .and_then(|v| v.get("request"))
+                        .and_then(|v| v.get("uri"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|uri| uri == target_url)
+                })
+            })
+        }
+    })
+    .await;
+
+    let _ = upstream_shutdown.send(());
+    let _ = upstream_task.await;
+}
+
 fn reserve_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind local ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
