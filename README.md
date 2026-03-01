@@ -192,6 +192,25 @@ Included:
 - HTTPS `ifconfig.co` via proxy + capture validation
 - plugin middleware substitution + dynamic module registration end-to-end
 
+## CI/CD (GitHub Actions)
+
+Workflow file: `.github/workflows/ci-release.yml`
+
+- On `push` / `pull_request`: runs format check and full test suite.
+- On tag push `v*` (example: `v0.2.0`):
+  - builds `roxy` release executable and uploads assets to GitHub Release
+  - builds and pushes Docker image to Docker Hub
+
+Required repository secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+Docker image target:
+
+- `docker.io/<DOCKERHUB_USERNAME>/roxy:<tag>`
+- `docker.io/<DOCKERHUB_USERNAME>/roxy:latest`
+
 ## Plugin Notes
 
 - Plugins are external Python scripts managed by the plugin manager.
