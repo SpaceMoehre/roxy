@@ -39,49 +39,59 @@
             <h2>Target Scope & Site Map</h2>
             <button id="refresh-site-map">Refresh</button>
           </div>
-          <div class="split-grid">
-            <article class="card">
-              <h3>Site Map</h3>
-              <form id="scope-form" class="stack scope-form">
-                <label for="scope-host">Add Scope Host (exact or wildcard: *.example.com)</label>
-                <input id="scope-host" placeholder="*.target.tld" />
-                <div class="button-row">
-                  <button type="submit">Add To Scope</button>
-                  <button type="button" class="warn" id="scope-clear">Clear Scope</button>
-                </div>
-              </form>
-              <div id="scope-list" class="scroll-list scope-list-compact"></div>
-              <div id="site-map" class="scroll-list" aria-live="polite"></div>
-            </article>
-            <article class="card">
-              <h3>History Search</h3>
-              <form id="history-form" class="stack">
-                <label for="history-q">Query</label>
-                <input id="history-q" placeholder="method, path, body token..." />
-                <button type="submit">Search</button>
-              </form>
-              <div class="proxy-history-layout">
-                <div class="proxy-history-upper">
-                  <div id="history-results" class="scroll-list"></div>
-                </div>
-                <div class="proxy-history-lower">
-                  <div class="proxy-history-toolbar">
-                    <div id="history-detail-meta" class="status">No search result selected</div>
+          <div class="split-grid target-tree">
+            <details class="target-tree-group" open>
+              <summary>
+                <span class="settings-group-title">Site Map</span>
+                <span class="settings-group-meta">Scope and discovered hosts</span>
+              </summary>
+              <div class="settings-group-body">
+                <form id="scope-form" class="stack scope-form">
+                  <label for="scope-host">Add Scope Host (exact or wildcard: *.example.com)</label>
+                  <input id="scope-host" placeholder="*.target.tld" />
+                  <div class="button-row">
+                    <button type="submit">Add To Scope</button>
+                    <button type="button" class="warn" id="scope-clear">Clear Scope</button>
                   </div>
-                  <div id="history-detail-empty" class="scroll-item">Select a search result above.</div>
-                  <div id="history-detail-grid" class="proxy-history-detail-grid" style="display:none;">
-                    <div class="proxy-history-pane">
-                      <h4>Request</h4>
-                      <pre id="history-detail-request" class="output"></pre>
+                </form>
+                <div id="scope-list" class="scroll-list scope-list-compact"></div>
+                <div id="site-map" class="scroll-list" aria-live="polite"></div>
+              </div>
+            </details>
+            <details class="target-tree-group" open>
+              <summary>
+                <span class="settings-group-title">History Search</span>
+                <span class="settings-group-meta">Captured request and response lookup</span>
+              </summary>
+              <div class="settings-group-body">
+                <form id="history-form" class="stack">
+                  <label for="history-q">Query</label>
+                  <input id="history-q" placeholder="method, path, body token..." />
+                  <button type="submit">Search</button>
+                </form>
+                <div class="proxy-history-layout">
+                  <div class="proxy-history-upper">
+                    <div id="history-results" class="scroll-list"></div>
+                  </div>
+                  <div class="proxy-history-lower">
+                    <div class="proxy-history-toolbar">
+                      <div id="history-detail-meta" class="status">No search result selected</div>
                     </div>
-                    <div class="proxy-history-pane">
-                      <h4>Response</h4>
-                      <pre id="history-detail-response" class="output"></pre>
+                    <div id="history-detail-empty" class="scroll-item">Select a search result above.</div>
+                    <div id="history-detail-grid" class="proxy-history-detail-grid" style="display:none;">
+                      <div class="proxy-history-pane">
+                        <h4>Request</h4>
+                        <pre id="history-detail-request" class="output"></pre>
+                      </div>
+                      <div class="proxy-history-pane">
+                        <h4>Response</h4>
+                        <pre id="history-detail-response" class="output"></pre>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            </article>
+            </details>
           </div>
         </section>
 

@@ -386,8 +386,17 @@ body {
   overflow: hidden;
 }
 
+.target-tree-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
 .settings-group > summary,
-.settings-subgroup > summary {
+.settings-subgroup > summary,
+.target-tree-group > summary {
   list-style: none;
   cursor: pointer;
   padding: 10px 12px;
@@ -399,17 +408,20 @@ body {
 }
 
 .settings-group > summary::-webkit-details-marker,
-.settings-subgroup > summary::-webkit-details-marker {
+.settings-subgroup > summary::-webkit-details-marker,
+.target-tree-group > summary::-webkit-details-marker {
   display: none;
 }
 
 .settings-group[open] > summary,
-.settings-subgroup[open] > summary {
+.settings-subgroup[open] > summary,
+.target-tree-group[open] > summary {
   border-bottom-color: var(--line);
 }
 
 .settings-group > summary::after,
-.settings-subgroup > summary::after {
+.settings-subgroup > summary::after,
+.target-tree-group > summary::after {
   content: "▸";
   color: var(--muted);
   font-size: 12px;
@@ -417,7 +429,8 @@ body {
 }
 
 .settings-group[open] > summary::after,
-.settings-subgroup[open] > summary::after {
+.settings-subgroup[open] > summary::after,
+.target-tree-group[open] > summary::after {
   content: "▾";
 }
 
@@ -464,6 +477,10 @@ body {
   display: grid;
   gap: 8px;
   grid-template-columns: 1fr 1fr;
+}
+
+.target-tree {
+  grid-template-columns: 1fr;
 }
 
 .plugins-substitution-row {
