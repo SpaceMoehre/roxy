@@ -262,6 +262,104 @@ body {
   margin-bottom: 7px;
 }
 
+.settings-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.settings-save-all {
+  margin-left: auto;
+}
+
+.settings-accordion {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-group,
+.settings-subgroup {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.settings-group > summary,
+.settings-subgroup > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid transparent;
+}
+
+.settings-group > summary::-webkit-details-marker,
+.settings-subgroup > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-group[open] > summary,
+.settings-subgroup[open] > summary {
+  border-bottom-color: var(--line);
+}
+
+.settings-group > summary::after,
+.settings-subgroup > summary::after {
+  content: "▸";
+  color: var(--muted);
+  font-size: 12px;
+  transform: translateY(1px);
+}
+
+.settings-group[open] > summary::after,
+.settings-subgroup[open] > summary::after {
+  content: "▾";
+}
+
+.settings-group-title,
+.settings-subgroup-title {
+  font-size: 13px;
+  font-weight: 670;
+  color: var(--text);
+}
+
+.settings-group-meta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-group-body {
+  padding: 8px;
+}
+
+.settings-module-list {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-subgroup {
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+}
+
+.settings-subgroup-body {
+  padding: 8px;
+}
+
+.settings-subgroup-body .card {
+  box-shadow: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
 .split-grid {
   display: grid;
   gap: 8px;
@@ -565,5 +663,14 @@ select:focus-visible,
 
   .inline-form {
     grid-template-columns: 1fr;
+  }
+
+  .settings-group > summary {
+    flex-wrap: wrap;
+  }
+
+  .settings-group-meta {
+    margin-left: 0;
+    width: 100%;
   }
 }

@@ -30,8 +30,8 @@ High-performance, async-first HTTP(S) interception proxy for security testing wo
   - Intruder
   - Repeater
   - Decoder
-  - Events
   - Settings
+- Dynamic UI module registration from plugins (`register_ui_modules` output op).
 - Proxy history UX:
   - upper list of captured requests
   - lower split viewer for selected item
@@ -39,6 +39,7 @@ High-performance, async-first HTTP(S) interception proxy for security testing wo
 - Intruder with async job execution, strategies (`cluster_bomb`, `sniper`), and live progress.
 - Repeater and Decoder exposed as API operations.
 - Plugin state operations (toggle intercept/MITM/scope from plugin outputs).
+- Plugin autoload from `plugins/` directory at startup.
 
 ## Architecture
 
@@ -111,6 +112,7 @@ Notes:
 | `ROXY_API_BIND` | `127.0.0.1:3000` | API/UI listener |
 | `ROXY_WS_BIND` | `127.0.0.1:3001` | WebSocket listener |
 | `ROXY_DATA_DIR` | `.roxy-data` | Cert and storage root |
+| `ROXY_PLUGIN_DIR` | `./plugins` | Python plugin autoload directory |
 | `ROXY_DEBUG_LOGGING` | `false` | Enables extensive proxy debug logs |
 | `ROXY_DEBUG_LOG_BODIES` | `false` | Includes request/response body previews in debug logs |
 | `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes logged per body preview |
@@ -164,8 +166,11 @@ Base: `/api/v1`
 
 ### Plugins
 
+- `GET|POST /ui/modules`
 - `GET|POST /plugins`
 - `DELETE /plugins/{id}`
+- `GET|PUT /plugins/{id}/settings`
+- `GET /plugins/{id}/alterations`
 - `POST /plugins/{id}/invoke`
 
 ## Testing
@@ -189,12 +194,30 @@ Included:
 - script-based API smoke test
 - proxy intercept + history end-to-end
 - HTTPS `ifconfig.co` via proxy + capture validation
+- plugin middleware substitution + dynamic module registration end-to-end
 
 ## Plugin Notes
 
 - Plugins are external Python scripts managed by the plugin manager.
+- Middleware hooks are available:
+  - `on_request_pre_capture`
+  - `on_response_pre_capture`
+- The Web UI includes a dedicated `Plugins` tab with:
+  - installed plugin dropdown
+  - plugin settings editor
+  - alteration history list
+- Plugin-defined settings UI can be injected dynamically into the global Settings tab through `register_ui_modules`.
 - Decoder extension mode format: `plugin:<plugin-name>`.
-- Plugin output can include `state_ops` to mutate runtime controls (e.g. intercept flags, MITM, scope hosts).
+- Plugin output can include:
+  - `state_ops` to mutate runtime controls (e.g. intercept flags, MITM, scope hosts)
+  - `register_ui_modules` to inject custom web tabs/settings sections
+- Python SDK package is included at `python/roxy-plugin-sdk` and can be installed with:
+
+```bash
+pip install ./python/roxy-plugin-sdk
+```
+
+- Demo plugin: `plugins/demo_substitute.py` (request/response string substitution middleware + module registration).
 
 ## Current Status and Roadmap
 

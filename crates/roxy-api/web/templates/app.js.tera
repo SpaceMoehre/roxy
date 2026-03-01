@@ -1,5 +1,6 @@
 const apiBase = '/api/v1';
 const UI_SETTINGS_STORAGE_KEY = 'roxy-ui-settings-v1';
+const SETTINGS_ACCORDION_STORAGE_KEY = 'roxy-settings-accordion-v1';
 
 const appState = {
   selectedRequest: null,
@@ -106,6 +107,88 @@ function loadUiSettings() {
 
 function persistUiSettings() {
   localStorage.setItem(UI_SETTINGS_STORAGE_KEY, JSON.stringify(appState.settings));
+}
+
+function loadSettingsAccordionState() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_ACCORDION_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function persistSettingsAccordionState(state) {
+  localStorage.setItem(SETTINGS_ACCORDION_STORAGE_KEY, JSON.stringify(state));
+}
+
+function settingsAccordionKey(el) {
+  if (el.dataset.settingsGroup) {
+    return `group:${el.dataset.settingsGroup}`;
+  }
+  if (el.dataset.module) {
+    return `module:${el.dataset.module}`;
+  }
+  return '';
+}
+
+function initSettingsAccordion() {
+  const sections = Array.from(document.querySelectorAll('.settings-group, .settings-subgroup'));
+  if (!sections.length) {
+    return;
+  }
+
+  const state = loadSettingsAccordionState();
+  for (const section of sections) {
+    const key = settingsAccordionKey(section);
+    if (key && key in state) {
+      section.open = Boolean(state[key]);
+    }
+
+    section.addEventListener('toggle', () => {
+      const toggleKey = settingsAccordionKey(section);
+      if (!toggleKey) {
+        return;
+      }
+      state[toggleKey] = section.open;
+      persistSettingsAccordionState(state);
+    });
+  }
+
+  const expandBtn = qs('settings-expand-all');
+  if (expandBtn) {
+    expandBtn.addEventListener('click', () => {
+      for (const section of sections) {
+        section.open = true;
+        const key = settingsAccordionKey(section);
+        if (key) {
+          state[key] = true;
+        }
+      }
+      persistSettingsAccordionState(state);
+    });
+  }
+
+  const collapseBtn = qs('settings-collapse-all');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', () => {
+      for (const section of sections) {
+        section.open = false;
+        const key = settingsAccordionKey(section);
+        if (key) {
+          state[key] = false;
+        }
+      }
+      persistSettingsAccordionState(state);
+    });
+  }
 }
 
 function getModuleSetting(moduleId, key, fallbackValue) {
@@ -805,6 +888,7 @@ function bindEvents() {
 async function init() {
   renderTabs();
   renderProxySubtabs();
+  initSettingsAccordion();
   setProxyHistoryMode('both');
   bindEvents();
   applyThemePreference();

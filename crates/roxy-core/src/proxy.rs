@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::{
     cert::CertManager,
     config::ProxyConfig,
+    middleware::ProxyMiddleware,
     model::{
         CapturedExchange, CapturedRequest, CapturedResponse, EventEnvelope, HeaderValuePair,
         apply_mutation, apply_response_mutation, headers_to_pairs, now_unix_ms,
@@ -46,6 +47,7 @@ pub struct ProxyEngine {
     cert_manager: Arc<CertManager>,
     event_tx: mpsc::Sender<EventEnvelope>,
     client: Client,
+    middleware: Option<Arc<dyn ProxyMiddleware>>,
 }
 
 impl ProxyEngine {
@@ -68,7 +70,13 @@ impl ProxyEngine {
             cert_manager,
             event_tx,
             client,
+            middleware: None,
         }
+    }
+
+    pub fn with_middleware(mut self, middleware: Arc<dyn ProxyMiddleware>) -> Self {
+        self.middleware = Some(middleware);
+        self
     }
 
     pub async fn run(self) -> Result<()> {
@@ -308,8 +316,24 @@ impl ProxyEngine {
         };
         self.log_request_snapshot("captured", &captured_request);
 
-        self.state
-            .register_site_path(host, parts.uri.path().to_string());
+        if let Some(middleware) = &self.middleware {
+            match middleware
+                .on_request_pre_capture(captured_request.clone())
+                .await
+            {
+                Ok(mut mutated) => {
+                    mutated.id = request_id;
+                    if mutated.created_at_unix_ms == 0 {
+                        mutated.created_at_unix_ms = captured_request.created_at_unix_ms;
+                    }
+                    captured_request = mutated;
+                    self.log_request_snapshot("middleware-mutated", &captured_request);
+                }
+                Err(err) => {
+                    warn!(%err, %request_id, "request middleware hook failed");
+                }
+            }
+        }
 
         if self.state.intercept_enabled() {
             self.log_debug(
@@ -355,6 +379,15 @@ impl ProxyEngine {
         captured_request.headers = parsed_request.headers.clone();
         captured_request.body = parsed_request.body.clone();
         self.log_request_snapshot("forwarding", &captured_request);
+
+        let parsed_path = parsed_request
+            .uri
+            .parse::<http::Uri>()
+            .ok()
+            .map(|uri| uri.path().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        self.state
+            .register_site_path(captured_request.host.clone(), parsed_path);
 
         let mut outbound = self
             .client
@@ -425,6 +458,25 @@ impl ProxyEngine {
             body: response_body,
         };
         self.log_response_snapshot("upstream", &captured_response);
+
+        if let Some(middleware) = &self.middleware {
+            match middleware
+                .on_response_pre_capture(&captured_request, captured_response.clone())
+                .await
+            {
+                Ok(mut mutated) => {
+                    mutated.request_id = request_id;
+                    if mutated.created_at_unix_ms == 0 {
+                        mutated.created_at_unix_ms = captured_response.created_at_unix_ms;
+                    }
+                    captured_response = mutated;
+                    self.log_response_snapshot("middleware-mutated", &captured_response);
+                }
+                Err(err) => {
+                    warn!(%err, %request_id, "response middleware hook failed");
+                }
+            }
+        }
 
         if self.state.intercept_response_enabled() {
             self.log_debug(

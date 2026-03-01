@@ -173,40 +173,73 @@
           <div class="panel-head">
             <h2>Proxy Settings</h2>
           </div>
-          <article class="card">
-            <div class="stack scope-form">
-              <h3>Interface</h3>
-              <form id="ui-settings-form" class="stack">
-                <label for="theme-preference">Theme mode</label>
-                <select id="theme-preference">
-                  <option value="auto">Auto (system)</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
-                <button type="submit" class="accent">Save UI Settings</button>
-              </form>
-              <div id="settings-status" class="status">Settings are stored in your browser.</div>
-            </div>
-          </article>
-
-          <div class="split-grid module-settings-grid">
-            {% for module in modules %}
-            <article class="card module-settings-card" data-module="{{ module.id }}">
-              {{ module.settings_html | safe }}
-            </article>
-            {% endfor %}
+          <div class="settings-toolbar">
+            <button id="settings-expand-all" type="button">Expand All</button>
+            <button id="settings-collapse-all" type="button">Collapse All</button>
+            <button id="settings-save-all" type="submit" form="ui-settings-form" class="accent settings-save-all">Save All Settings</button>
           </div>
 
-          <article class="card">
-            <h3>Certificate Authority</h3>
-            <div class="button-row">
-              <a href="/api/v1/proxy/settings/ca.der" download="roxy-ca.der" class="button-link">Download CA (.der)</a>
-              <button id="regenerate-ca" class="warn">Regenerate CA</button>
-            </div>
-            <p class="hint">
-              After regenerating CA, re-import the cert in your local trust store and restart apps using the proxy.
-            </p>
-          </article>
+          <div class="settings-accordion">
+            <details class="settings-group" data-settings-group="interface" open>
+              <summary>
+                <span class="settings-group-title">Interface</span>
+                <span class="settings-group-meta">Theme and UI behavior</span>
+              </summary>
+              <div class="settings-group-body">
+                <article class="card">
+                  <form id="ui-settings-form" class="stack">
+                    <label for="theme-preference">Theme mode</label>
+                    <select id="theme-preference">
+                      <option value="auto">Auto (system)</option>
+                      <option value="light">Light</option>
+                      <option value="dark">Dark</option>
+                    </select>
+                  </form>
+                  <div id="settings-status" class="status">Settings are stored in your browser.</div>
+                </article>
+              </div>
+            </details>
+
+            <details class="settings-group" data-settings-group="proxy" open>
+              <summary>
+                <span class="settings-group-title">Proxy & Certificates</span>
+                <span class="settings-group-meta">Trust store and CA management</span>
+              </summary>
+              <div class="settings-group-body">
+                <article class="card">
+                  <h3>Certificate Authority</h3>
+                  <div class="button-row">
+                    <a href="/api/v1/proxy/settings/ca.der" download="roxy-ca.der" class="button-link">Download CA (.der)</a>
+                    <button id="regenerate-ca" class="warn">Regenerate CA</button>
+                  </div>
+                  <p class="hint">
+                    After regenerating CA, re-import the cert in your local trust store and restart apps using the proxy.
+                  </p>
+                </article>
+              </div>
+            </details>
+
+            <details class="settings-group" data-settings-group="modules" open>
+              <summary>
+                <span class="settings-group-title">Modules & Plugins</span>
+                <span class="settings-group-meta">Feature-specific module settings</span>
+              </summary>
+              <div class="settings-group-body">
+                <div class="settings-module-list">
+                  {% for module in modules %}
+                  <details class="settings-subgroup module-settings-card" data-module="{{ module.id }}">
+                    <summary>
+                      <span class="settings-subgroup-title">{{ module.title }}</span>
+                    </summary>
+                    <div class="settings-subgroup-body">
+                      {{ module.settings_html | safe }}
+                    </div>
+                  </details>
+                  {% endfor %}
+                </div>
+              </div>
+            </details>
+          </div>
         </section>
       </main>
     </div>

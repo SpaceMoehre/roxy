@@ -1,4 +1,4 @@
-mod web_modules;
+pub mod web_modules;
 pub mod ws;
 
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -47,6 +47,7 @@ impl ApiState {
         plugins: PluginManager,
         intruder: IntruderManager,
         ws_hub: WsHub,
+        ui_modules: Arc<web_modules::UiModuleRegistry>,
     ) -> Self {
         Self {
             app_state,
@@ -55,7 +56,7 @@ impl ApiState {
             plugins,
             intruder,
             ws_hub,
-            ui_modules: Arc::new(web_modules::UiModuleRegistry::with_builtin_modules()),
+            ui_modules,
         }
     }
 }
@@ -150,9 +151,23 @@ struct RegisterPluginRequest {
 }
 
 #[derive(Deserialize)]
+struct RegisterUiModuleRequest {
+    id: String,
+    title: String,
+    panel_html: String,
+    settings_html: String,
+    script_js: String,
+}
+
+#[derive(Deserialize)]
 struct InvokePluginRequest {
     hook: String,
     payload: Value,
+}
+
+#[derive(Deserialize)]
+struct PluginAlterationsQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +214,12 @@ struct IntruderPath {
 #[derive(Deserialize)]
 struct ScopePath {
     host: String,
+}
+
+#[derive(Serialize)]
+struct PluginOpsApplied {
+    state_ops_applied: usize,
+    ui_modules_registered: usize,
 }
 
 pub async fn run_api(bind: SocketAddr, state: ApiState) -> std::io::Result<()> {
@@ -261,9 +282,17 @@ pub async fn run_api_with_shutdown(
                             .route("/target/scope/{host}", web::delete().to(remove_scope))
                             .route("/history/search", web::get().to(history_search))
                             .route("/history/recent", web::get().to(history_recent))
+                            .route("/ui/modules", web::get().to(list_ui_modules))
+                            .route("/ui/modules", web::post().to(register_ui_module))
                             .route("/plugins", web::get().to(list_plugins))
                             .route("/plugins", web::post().to(register_plugin))
                             .route("/plugins/{id}", web::delete().to(unregister_plugin))
+                            .route("/plugins/{id}/settings", web::get().to(get_plugin_settings))
+                            .route("/plugins/{id}/settings", web::put().to(set_plugin_settings))
+                            .route(
+                                "/plugins/{id}/alterations",
+                                web::get().to(list_plugin_alterations),
+                            )
                             .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
                             .route("/repeater/send", web::post().to(repeater_send))
                             .route("/decoder/transform", web::post().to(decode_transform))
@@ -306,7 +335,8 @@ pub async fn run_api_with_shutdown(
 
 fn render_index_html(state: &ApiState) -> Result<String> {
     let mut context = TeraContext::new();
-    context.insert("modules", state.ui_modules.modules());
+    let modules = state.ui_modules.modules();
+    context.insert("modules", &modules);
     Tera::one_off(INDEX_TEMPLATE, &context, false).context("failed rendering index template")
 }
 
@@ -544,6 +574,31 @@ async fn history_recent(
     }
 }
 
+async fn list_ui_modules(state: web::types::State<ApiState>) -> HttpResponse {
+    HttpResponse::Ok().json(&state.ui_modules.modules())
+}
+
+async fn register_ui_module(
+    state: web::types::State<ApiState>,
+    req: web::types::Json<RegisterUiModuleRequest>,
+) -> HttpResponse {
+    if req.id.trim().is_empty() || req.title.trim().is_empty() {
+        return json_error(
+            HttpResponse::BadRequest(),
+            "module id and title must not be empty",
+        );
+    }
+
+    state.ui_modules.register(web_modules::UiModule {
+        id: req.id.trim().to_string(),
+        title: req.title.trim().to_string(),
+        panel_html: req.panel_html.clone(),
+        settings_html: req.settings_html.clone(),
+        script_js: req.script_js.clone(),
+    });
+    HttpResponse::Created().finish()
+}
+
 async fn register_plugin(
     state: web::types::State<ApiState>,
     req: web::types::Json<RegisterPluginRequest>,
@@ -555,7 +610,46 @@ async fn register_plugin(
     };
 
     match state.plugins.register(registration).await {
-        Ok(_) => HttpResponse::Created().finish(),
+        Ok(_) => {
+            let mut ops_applied = PluginOpsApplied {
+                state_ops_applied: 0,
+                ui_modules_registered: 0,
+            };
+
+            if req.hooks.iter().any(|hook| hook == "on_load") {
+                match state
+                    .plugins
+                    .invoke(
+                        &req.name,
+                        PluginInvocation {
+                            hook: "on_load".to_string(),
+                            payload: serde_json::json!({
+                                "api_base": "/api/v1",
+                                "ui_module_schema_version": 1
+                            }),
+                        },
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        ops_applied = apply_plugin_output_ops(
+                            &state.app_state,
+                            &state.ui_modules,
+                            &result.output,
+                        );
+                    }
+                    Err(err) => {
+                        let _ = state.plugins.unregister(&req.name).await;
+                        return json_error(
+                            HttpResponse::BadRequest(),
+                            &format!("plugin on_load hook failed: {err}"),
+                        );
+                    }
+                }
+            }
+
+            HttpResponse::Created().json(&ops_applied)
+        }
         Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
     }
 }
@@ -580,6 +674,48 @@ async fn unregister_plugin(
     }
 }
 
+async fn get_plugin_settings(
+    state: web::types::State<ApiState>,
+    path: web::types::Path<PluginPath>,
+) -> HttpResponse {
+    match state.plugins.get_settings(&path.id).await {
+        Ok(settings) => HttpResponse::Ok().json(&settings),
+        Err(err) => json_error(HttpResponse::NotFound(), &err.to_string()),
+    }
+}
+
+async fn set_plugin_settings(
+    state: web::types::State<ApiState>,
+    path: web::types::Path<PluginPath>,
+    req: web::types::Json<Value>,
+) -> HttpResponse {
+    let value = match req.into_inner() {
+        Value::Object(map) => Value::Object(map),
+        _ => {
+            return json_error(
+                HttpResponse::BadRequest(),
+                "plugin settings payload must be a JSON object",
+            );
+        }
+    };
+    match state.plugins.set_settings(&path.id, value).await {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(err) => json_error(HttpResponse::NotFound(), &err.to_string()),
+    }
+}
+
+async fn list_plugin_alterations(
+    state: web::types::State<ApiState>,
+    path: web::types::Path<PluginPath>,
+    query: web::types::Query<PluginAlterationsQuery>,
+) -> HttpResponse {
+    let limit = query.limit.unwrap_or(200).min(1_000);
+    match state.plugins.list_alterations(&path.id, limit).await {
+        Ok(rows) => HttpResponse::Ok().json(&rows),
+        Err(err) => json_error(HttpResponse::NotFound(), &err.to_string()),
+    }
+}
+
 async fn invoke_plugin(
     state: web::types::State<ApiState>,
     path: web::types::Path<PluginPath>,
@@ -597,10 +733,12 @@ async fn invoke_plugin(
         .await
     {
         Ok(result) => {
-            let applied = apply_plugin_state_ops(&state.app_state, &result.output);
+            let applied =
+                apply_plugin_output_ops(&state.app_state, &state.ui_modules, &result.output);
             HttpResponse::Ok().json(&serde_json::json!({
                 "plugin_result": result,
-                "state_ops_applied": applied
+                "state_ops_applied": applied.state_ops_applied,
+                "ui_modules_registered": applied.ui_modules_registered
             }))
         }
         Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
@@ -702,7 +840,11 @@ async fn decode_transform(
                 .await
             {
                 Ok(response) => {
-                    let applied = apply_plugin_state_ops(&state.app_state, &response.output);
+                    let applied = apply_plugin_output_ops(
+                        &state.app_state,
+                        &state.ui_modules,
+                        &response.output,
+                    );
                     let result = response
                         .output
                         .get("result")
@@ -711,7 +853,8 @@ async fn decode_transform(
                         .unwrap_or_else(|| response.output.to_string());
                     HttpResponse::Ok().json(&serde_json::json!({
                         "result": result,
-                        "state_ops_applied": applied
+                        "state_ops_applied": applied.state_ops_applied,
+                        "ui_modules_registered": applied.ui_modules_registered
                     }))
                 }
                 Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
@@ -865,6 +1008,17 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     Ok(addr)
 }
 
+fn apply_plugin_output_ops(
+    app_state: &AppState,
+    ui_modules: &web_modules::UiModuleRegistry,
+    output: &Value,
+) -> PluginOpsApplied {
+    PluginOpsApplied {
+        state_ops_applied: apply_plugin_state_ops(app_state, output),
+        ui_modules_registered: apply_plugin_ui_modules(ui_modules, output),
+    }
+}
+
 fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     let mut applied = 0usize;
     let Some(ops) = output.get("state_ops").and_then(|v| v.as_array()) else {
@@ -912,6 +1066,47 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     applied
 }
 
+fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &Value) -> usize {
+    let Some(modules) = output.get("register_ui_modules").and_then(Value::as_array) else {
+        return 0;
+    };
+
+    let mut registered = 0usize;
+    for module in modules {
+        let Some(id) = module.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(title) = module.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(panel_html) = module.get("panel_html").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(settings_html) = module.get("settings_html").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(script_js) = module.get("script_js").and_then(Value::as_str) else {
+            continue;
+        };
+
+        let id = id.trim();
+        let title = title.trim();
+        if id.is_empty() || title.is_empty() {
+            continue;
+        }
+
+        ui_modules.register(web_modules::UiModule {
+            id: id.to_string(),
+            title: title.to_string(),
+            panel_html: panel_html.to_string(),
+            settings_html: settings_html.to_string(),
+            script_js: script_js.to_string(),
+        });
+        registered += 1;
+    }
+    registered
+}
+
 fn json_error(mut builder: ntex::http::ResponseBuilder, msg: &str) -> HttpResponse {
     builder.json(&ApiErrorBody {
         error: msg.to_string(),
@@ -921,6 +1116,7 @@ fn json_error(mut builder: ntex::http::ResponseBuilder, msg: &str) -> HttpRespon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roxy_core::AppState;
 
     #[test]
     fn parses_forward_decision() {
@@ -960,5 +1156,45 @@ mod tests {
         };
         let err = parse_decision(&req).expect_err("should fail");
         assert!(err.to_string().contains("raw_base64"));
+    }
+
+    #[test]
+    fn plugin_output_ops_registers_ui_module() {
+        let app_state = AppState::new();
+        let modules = web_modules::UiModuleRegistry::new();
+        let output = serde_json::json!({
+            "state_ops": [
+                { "op": "set_mitm_enabled", "enabled": false }
+            ],
+            "register_ui_modules": [
+                {
+                    "id": "demo",
+                    "title": "Demo",
+                    "panel_html": "<div>demo</div>",
+                    "settings_html": "<div>settings</div>",
+                    "script_js": "window.__demo=true;"
+                }
+            ]
+        });
+
+        let applied = apply_plugin_output_ops(&app_state, &modules, &output);
+        assert_eq!(applied.state_ops_applied, 1);
+        assert_eq!(applied.ui_modules_registered, 1);
+        assert!(!app_state.mitm_enabled());
+        assert!(modules.modules().iter().any(|m| m.id == "demo"));
+    }
+
+    #[test]
+    fn plugin_alteration_query_limit_defaults() {
+        let query = PluginAlterationsQuery { limit: None };
+        assert_eq!(query.limit, None);
+        let sample = roxy_plugin::PluginAlteration {
+            plugin: "demo".to_string(),
+            hook: "on_request_pre_capture".to_string(),
+            request_id: Some("abc".to_string()),
+            unix_ms: 1,
+            summary: "changed".to_string(),
+        };
+        assert_eq!(sample.plugin, "demo");
     }
 }

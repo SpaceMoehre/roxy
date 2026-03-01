@@ -2331,6 +2331,9 @@ name = "roxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
  "ntex",
  "reqwest",
  "roxy-api",
@@ -2342,6 +2345,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zstd",
 ]
 
@@ -2373,6 +2377,7 @@ name = "roxy-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "boring",
  "brotli",
  "bytes",

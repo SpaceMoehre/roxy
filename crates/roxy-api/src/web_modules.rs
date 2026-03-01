@@ -1,12 +1,13 @@
-use serde::Serialize;
+use std::sync::RwLock;
 
-#[derive(Clone, Debug, Serialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiModule {
     pub id: String,
     pub title: String,
     pub panel_html: String,
     pub settings_html: String,
-    #[serde(skip_serializing)]
     pub script_js: String,
 }
 
@@ -28,9 +29,9 @@ impl UiModule {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct UiModuleRegistry {
-    modules: Vec<UiModule>,
+    modules: RwLock<Vec<UiModule>>,
 }
 
 impl UiModuleRegistry {
@@ -38,20 +39,29 @@ impl UiModuleRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, module: UiModule) {
-        if let Some(existing) = self.modules.iter_mut().find(|m| m.id == module.id) {
+    pub fn register(&self, module: UiModule) {
+        let mut modules = self
+            .modules
+            .write()
+            .expect("ui module registry lock poisoned");
+        if let Some(existing) = modules.iter_mut().find(|m| m.id == module.id) {
             *existing = module;
             return;
         }
-        self.modules.push(module);
+        modules.push(module);
     }
 
-    pub fn modules(&self) -> &[UiModule] {
-        &self.modules
+    pub fn modules(&self) -> Vec<UiModule> {
+        self.modules
+            .read()
+            .expect("ui module registry lock poisoned")
+            .clone()
     }
 
     pub fn module_scripts_bundle(&self) -> String {
         self.modules
+            .read()
+            .expect("ui module registry lock poisoned")
             .iter()
             .map(|module| module.script_js.as_str())
             .collect::<Vec<_>>()
@@ -59,7 +69,7 @@ impl UiModuleRegistry {
     }
 
     pub fn with_builtin_modules() -> Self {
-        let mut registry = Self::new();
+        let registry = Self::new();
         registry.register(UiModule::new(
             "intruder",
             "Intruder",
@@ -81,6 +91,13 @@ impl UiModuleRegistry {
             include_str!("../web/modules/decoder/settings.html"),
             include_str!("../web/modules/decoder/app.js"),
         ));
+        registry.register(UiModule::new(
+            "plugins",
+            "Plugins",
+            include_str!("../web/modules/plugins/panel.html"),
+            include_str!("../web/modules/plugins/settings.html"),
+            include_str!("../web/modules/plugins/app.js"),
+        ));
         registry
     }
 }
@@ -92,11 +109,8 @@ mod tests {
     #[test]
     fn builtins_are_registered() {
         let registry = UiModuleRegistry::with_builtin_modules();
-        let ids = registry
-            .modules()
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["intruder", "repeater", "decoder"]);
+        let modules = registry.modules();
+        let ids = modules.iter().map(|m| m.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["intruder", "repeater", "decoder", "plugins"]);
     }
 }

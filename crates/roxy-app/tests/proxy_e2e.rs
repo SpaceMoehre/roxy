@@ -46,10 +46,12 @@ async fn proxy_intercept_and_history_flow() {
     let data_dir = TempDir::new().expect("temp dir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
+    let plugin_dir = format!("{}/../../plugins", env!("CARGO_MANIFEST_DIR"));
     child
         .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
         .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
         .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_PLUGIN_DIR", plugin_dir)
         .env("ROXY_DATA_DIR", data_dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -367,6 +369,167 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
         }
     })
     .await;
+
+    let _ = upstream_shutdown.send(());
+    let _ = upstream_task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local socket permissions and python3 runtime in test environment"]
+async fn plugin_middleware_substitutes_request_and_response_blobs() {
+    let (upstream_addr, upstream_hits, upstream_shutdown, upstream_task) = start_upstream().await;
+
+    let proxy_port = reserve_port();
+    let api_port = reserve_port();
+    let ws_port = reserve_port();
+    let data_dir = TempDir::new().expect("temp dir");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
+    child
+        .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
+        .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
+        .env("ROXY_WS_BIND", format!("127.0.0.1:{ws_port}"))
+        .env("ROXY_DATA_DIR", data_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = child.spawn().expect("failed to spawn roxy");
+    let _child_guard = ChildGuard::new(child);
+
+    let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
+    let api_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("api client");
+    wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
+
+    wait_for(Duration::from_secs(10), || {
+        let api_client = api_client.clone();
+        let api_base = api_base.clone();
+        async move {
+            let response = match api_client.get(format!("{api_base}/plugins")).send().await {
+                Ok(row) => row,
+                Err(_) => return false,
+            };
+            let payload: Value = match response.json().await {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
+            payload.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name == "demo-substitute")
+                })
+            })
+        }
+    })
+    .await;
+
+    let index_html = api_client
+        .get(format!("http://127.0.0.1:{api_port}/"))
+        .send()
+        .await
+        .expect("fetch index")
+        .text()
+        .await
+        .expect("index text");
+    assert!(
+        index_html.contains("setting-demo-substitute-request-search"),
+        "expected demo plugin settings fields in settings tab"
+    );
+
+    let save_settings = api_client
+        .put(format!("{api_base}/plugins/demo-substitute/settings"))
+        .json(&json!({
+            "request_search": "hello",
+            "request_replace": "alpha",
+            "response_search": "upstream-ok",
+            "response_replace": "omega"
+        }))
+        .send()
+        .await
+        .expect("save plugin settings");
+    assert!(save_settings.status().is_success());
+
+    let proxy_client = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{proxy_port}")).expect("proxy config"))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("proxy client");
+
+    let target_url = format!("http://{upstream_addr}/hello-world");
+    let response = proxy_client
+        .get(target_url)
+        .send()
+        .await
+        .expect("proxy request");
+    assert_eq!(response.status().as_u16(), 200);
+    let body = response.text().await.expect("response text");
+    assert_eq!(body, "omega");
+
+    wait_for(Duration::from_secs(5), || async {
+        upstream_hits.load(Ordering::Relaxed) == 1
+    })
+    .await;
+
+    wait_for(Duration::from_secs(10), || {
+        let api_client = api_client.clone();
+        let api_base = api_base.clone();
+        async move {
+            let response = match api_client
+                .get(format!("{api_base}/history/recent?limit=100"))
+                .send()
+                .await
+            {
+                Ok(row) => row,
+                Err(_) => return false,
+            };
+            let payload: Value = match response.json().await {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            payload.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    let request_raw = row
+                        .get("exchange")
+                        .and_then(|v| v.get("request"))
+                        .and_then(|v| v.get("raw"))
+                        .and_then(decode_bytes_json_field);
+                    let response_body = row
+                        .get("exchange")
+                        .and_then(|v| v.get("response"))
+                        .and_then(|v| v.get("body"))
+                        .and_then(decode_bytes_json_field);
+
+                    request_raw
+                        .as_deref()
+                        .is_some_and(|blob| blob.contains("/alpha-world"))
+                        && response_body.as_deref() == Some("omega")
+                })
+            })
+        }
+    })
+    .await;
+
+    let alterations = api_client
+        .get(format!(
+            "{api_base}/plugins/demo-substitute/alterations?limit=20"
+        ))
+        .send()
+        .await
+        .expect("get plugin alterations")
+        .json::<Value>()
+        .await
+        .expect("alterations json");
+    assert!(
+        alterations.as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.get("summary").and_then(Value::as_str).is_some())
+        }),
+        "expected alteration entries for demo plugin"
+    );
 
     let _ = upstream_shutdown.send(());
     let _ = upstream_task.await;

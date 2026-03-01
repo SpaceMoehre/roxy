@@ -10,6 +10,7 @@ upstream-boring = ["dep:boring"]
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
 http.workspace = true

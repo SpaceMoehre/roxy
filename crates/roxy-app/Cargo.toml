@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -17,6 +19,8 @@ roxy-plugin = { path = "../roxy-plugin" }
 roxy-storage = { path = "../roxy-storage" }
 
 [dev-dependencies]
+bytes.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
 zstd.workspace = true

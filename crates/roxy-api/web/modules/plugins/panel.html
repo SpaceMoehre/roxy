@@ -1,0 +1,43 @@
+<article class="card">
+  <div class="panel-head">
+    <h3>Installed Plugins</h3>
+    <button id="plugins-refresh">Refresh</button>
+  </div>
+
+  <div class="stack">
+    <label for="plugins-select">Plugin</label>
+    <select id="plugins-select"></select>
+  </div>
+
+  <div class="split-grid">
+    <section class="card compact" id="plugins-demo-settings">
+      <h4>Demo Substitution Settings</h4>
+      <div class="stack">
+        <label for="plugins-demo-request-search">Request Search</label>
+        <input id="plugins-demo-request-search" placeholder="hello" />
+        <label for="plugins-demo-request-replace">Request Replace</label>
+        <input id="plugins-demo-request-replace" placeholder="roxy" />
+        <label for="plugins-demo-response-search">Response Search</label>
+        <input id="plugins-demo-response-search" placeholder="upstream-ok" />
+        <label for="plugins-demo-response-replace">Response Replace</label>
+        <input id="plugins-demo-response-replace" placeholder="plugin-ok" />
+      </div>
+    </section>
+
+    <section class="card compact">
+      <h4>Raw Plugin Settings (JSON)</h4>
+      <textarea id="plugins-settings-json" rows="10" spellcheck="false">{}</textarea>
+      <div class="button-row">
+        <button id="plugins-save-settings" class="accent">Save Settings</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="card compact">
+    <div class="panel-head">
+      <h4>Altered Requests / Responses</h4>
+      <button id="plugins-refresh-alterations">Refresh</button>
+    </div>
+    <div id="plugins-alterations" class="scroll-list"></div>
+  </section>
+</article>

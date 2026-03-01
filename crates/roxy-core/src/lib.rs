@@ -1,6 +1,7 @@
 pub mod cert;
 pub mod config;
 pub mod intruder;
+pub mod middleware;
 pub mod model;
 pub mod proxy;
 pub mod raw_http;
@@ -12,6 +13,7 @@ pub use intruder::{
     IntruderEvent, IntruderJobDetails, IntruderJobSnapshot, IntruderJobSpec, IntruderJobStatus,
     IntruderManager, IntruderPayloadSet, IntruderResult, IntruderStrategy,
 };
+pub use middleware::ProxyMiddleware;
 pub use model::{
     CapturedExchange, CapturedRequest, CapturedResponse, EventEnvelope, HeaderValuePair,
     RequestMutation, ResponseMutation,

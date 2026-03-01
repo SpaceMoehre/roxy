@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
@@ -30,9 +30,20 @@ pub struct PluginResponse {
     pub output: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginAlteration {
+    pub plugin: String,
+    pub hook: String,
+    pub request_id: Option<String>,
+    pub unix_ms: u128,
+    pub summary: String,
+}
+
 #[derive(Clone, Default)]
 pub struct PluginManager {
     registry: Arc<RwLock<HashMap<String, PluginRegistration>>>,
+    settings: Arc<RwLock<HashMap<String, Value>>>,
+    alterations: Arc<RwLock<HashMap<String, Vec<PluginAlteration>>>>,
 }
 
 impl PluginManager {
@@ -44,15 +55,31 @@ impl PluginManager {
             ));
         }
 
+        let plugin_name = registration.name.clone();
         self.registry
             .write()
             .await
-            .insert(registration.name.clone(), registration);
+            .insert(plugin_name.clone(), registration);
+        self.settings
+            .write()
+            .await
+            .entry(plugin_name.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        self.alterations
+            .write()
+            .await
+            .entry(plugin_name)
+            .or_insert_with(Vec::new);
         Ok(())
     }
 
     pub async fn unregister(&self, name: &str) -> bool {
-        self.registry.write().await.remove(name).is_some()
+        let removed = self.registry.write().await.remove(name).is_some();
+        if removed {
+            self.settings.write().await.remove(name);
+            self.alterations.write().await.remove(name);
+        }
+        removed
     }
 
     pub async fn list(&self) -> Vec<PluginRegistration> {
@@ -83,6 +110,9 @@ impl PluginManager {
             ));
         }
 
+        let invocation = self
+            .enrich_invocation_payload(plugin_name, invocation)
+            .await;
         run_python_plugin(&plugin, invocation).await
     }
 
@@ -103,10 +133,15 @@ impl PluginManager {
 
         let mut out = Vec::with_capacity(plugins.len());
         for plugin in plugins {
-            let invocation = PluginInvocation {
-                hook: hook.to_string(),
-                payload: payload.clone(),
-            };
+            let invocation = self
+                .enrich_invocation_payload(
+                    &plugin.name,
+                    PluginInvocation {
+                        hook: hook.to_string(),
+                        payload: payload.clone(),
+                    },
+                )
+                .await;
             let response = timeout(timeout_per_plugin, run_python_plugin(&plugin, invocation))
                 .await
                 .map_err(|_| anyhow!("plugin '{}' timed out", plugin.name))
@@ -115,6 +150,113 @@ impl PluginManager {
         }
 
         out
+    }
+
+    pub async fn set_settings(&self, plugin_name: &str, settings: Value) -> Result<()> {
+        if !self.registry.read().await.contains_key(plugin_name) {
+            return Err(anyhow!("unknown plugin: {plugin_name}"));
+        }
+        self.settings
+            .write()
+            .await
+            .insert(plugin_name.to_string(), normalize_plugin_settings(settings));
+        Ok(())
+    }
+
+    pub async fn get_settings(&self, plugin_name: &str) -> Result<Value> {
+        if !self.registry.read().await.contains_key(plugin_name) {
+            return Err(anyhow!("unknown plugin: {plugin_name}"));
+        }
+        Ok(self
+            .settings
+            .read()
+            .await
+            .get(plugin_name)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new())))
+    }
+
+    pub async fn record_alteration(&self, alteration: PluginAlteration) -> Result<()> {
+        if !self.registry.read().await.contains_key(&alteration.plugin) {
+            return Err(anyhow!("unknown plugin: {}", alteration.plugin));
+        }
+
+        let mut alterations = self.alterations.write().await;
+        let entries = alterations.entry(alteration.plugin.clone()).or_default();
+        entries.push(alteration);
+        if entries.len() > 1_000 {
+            let drain = entries.len() - 1_000;
+            entries.drain(0..drain);
+        }
+        Ok(())
+    }
+
+    pub async fn list_alterations(
+        &self,
+        plugin_name: &str,
+        limit: usize,
+    ) -> Result<Vec<PluginAlteration>> {
+        if !self.registry.read().await.contains_key(plugin_name) {
+            return Err(anyhow!("unknown plugin: {plugin_name}"));
+        }
+
+        let limit = limit.clamp(1, 1_000);
+        let mut rows = self
+            .alterations
+            .read()
+            .await
+            .get(plugin_name)
+            .cloned()
+            .unwrap_or_default();
+        rows.sort_by(|a, b| b.unix_ms.cmp(&a.unix_ms));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn enrich_invocation_payload(
+        &self,
+        plugin_name: &str,
+        invocation: PluginInvocation,
+    ) -> PluginInvocation {
+        let mut payload_obj = match invocation.payload {
+            Value::Object(map) => map,
+            other => {
+                let mut map = Map::new();
+                map.insert("payload".to_string(), other);
+                map
+            }
+        };
+
+        let settings = self
+            .settings
+            .read()
+            .await
+            .get(plugin_name)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+
+        payload_obj.insert(
+            "plugin_name".to_string(),
+            Value::String(plugin_name.to_string()),
+        );
+        payload_obj.insert("plugin_settings".to_string(), settings);
+
+        PluginInvocation {
+            hook: invocation.hook,
+            payload: Value::Object(payload_obj),
+        }
+    }
+}
+
+fn normalize_plugin_settings(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(map),
+        Value::Null => Value::Object(Map::new()),
+        other => {
+            let mut map = Map::new();
+            map.insert("value".to_string(), other);
+            Value::Object(map)
+        }
     }
 }
 
@@ -213,5 +355,52 @@ print(json.dumps({"hook": payload["hook"], "echo": payload["payload"]}))
 
         assert_eq!(response.output["hook"], "on_request");
         assert_eq!(response.output["echo"]["k"], "v");
+        assert_eq!(response.output["echo"]["plugin_name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn plugin_settings_are_injected_into_payload() {
+        let tmp = TempDir::new().expect("tempdir");
+        let script = tmp.path().join("plugin.py");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json, sys
+payload = json.loads(sys.stdin.read())
+print(json.dumps({"settings": payload["payload"].get("plugin_settings", {})}))
+"#,
+        )
+        .expect("write script");
+
+        let manager = PluginManager::default();
+        manager
+            .register(PluginRegistration {
+                name: "cfg".to_string(),
+                script_path: script,
+                hooks: vec!["hook".to_string()],
+            })
+            .await
+            .expect("register plugin");
+        manager
+            .set_settings(
+                "cfg",
+                serde_json::json!({"request_search": "hello", "request_replace": "roxy"}),
+            )
+            .await
+            .expect("set settings");
+
+        let response = manager
+            .invoke(
+                "cfg",
+                PluginInvocation {
+                    hook: "hook".to_string(),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await
+            .expect("invoke plugin");
+
+        assert_eq!(response.output["settings"]["request_search"], "hello");
+        assert_eq!(response.output["settings"]["request_replace"], "roxy");
     }
 }
