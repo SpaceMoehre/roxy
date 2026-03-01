@@ -419,7 +419,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
                 rows.iter().any(|row| {
                     row.get("name")
                         .and_then(Value::as_str)
-                        .is_some_and(|name| name == "demo-substitute")
+                        .is_some_and(|name| name == "string-substitute")
                 })
             })
         }
@@ -435,17 +435,25 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
         .await
         .expect("index text");
     assert!(
-        index_html.contains("setting-demo-substitute-request-search"),
-        "expected demo plugin settings fields in settings tab"
+        index_html.contains("setting-string-substitute-rule-count"),
+        "expected string-substitute settings fields in settings tab"
     );
 
     let save_settings = api_client
-        .put(format!("{api_base}/plugins/demo-substitute/settings"))
+        .put(format!("{api_base}/plugins/string-substitute/settings"))
         .json(&json!({
-            "request_search": "hello",
-            "request_replace": "alpha",
-            "response_search": "upstream-ok",
-            "response_replace": "omega"
+            "rules": [
+                {
+                    "scope": "request",
+                    "search": "hello",
+                    "replace": "alpha"
+                },
+                {
+                    "scope": "response",
+                    "search": "upstream-ok",
+                    "replace": "omega"
+                }
+            ]
         }))
         .send()
         .await
@@ -515,7 +523,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
 
     let alterations = api_client
         .get(format!(
-            "{api_base}/plugins/demo-substitute/alterations?limit=20"
+            "{api_base}/plugins/string-substitute/alterations?limit=20"
         ))
         .send()
         .await
@@ -528,7 +536,7 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
             rows.iter()
                 .any(|row| row.get("summary").and_then(Value::as_str).is_some())
         }),
-        "expected alteration entries for demo plugin"
+        "expected alteration entries for string-substitute plugin"
     );
 
     let _ = upstream_shutdown.send(());

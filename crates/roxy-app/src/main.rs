@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
@@ -438,12 +438,8 @@ async fn auto_register_plugins(
         return;
     };
 
-    let mut scripts = match fs::read_dir(&plugin_dir) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "py"))
-            .collect::<Vec<_>>(),
+    let mut scripts = match discover_plugin_scripts(&plugin_dir) {
+        Ok(scripts) => scripts,
         Err(err) => {
             warn!(%err, path = %plugin_dir.display(), "plugin autoload failed to read plugin directory");
             return;
@@ -501,6 +497,44 @@ async fn auto_register_plugins(
             }
         }
     }
+}
+
+fn discover_plugin_scripts(plugin_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut scripts = Vec::new();
+    let mut stack = vec![plugin_dir.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .with_context(|| format!("failed reading directory {}", dir.display()))?;
+
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("failed reading entry in {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry.file_type().with_context(|| {
+                format!("failed reading file type for {}", entry.path().display())
+            })?;
+
+            if file_type.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|name| name == "__pycache__")
+                {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+
+            if file_type.is_file() && path.extension().is_some_and(|ext| ext == "py") {
+                scripts.push(path);
+            }
+        }
+    }
+
+    scripts.sort();
+    Ok(scripts)
 }
 
 fn resolve_plugin_dir() -> Option<PathBuf> {
@@ -619,6 +653,10 @@ fn apply_plugin_ui_modules(ui_modules: &UiModuleRegistry, output: &Value) -> usi
         ui_modules.register(UiModule {
             id: id.to_string(),
             title: title.to_string(),
+            nav_hidden: module
+                .get("nav_hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),
@@ -699,12 +737,14 @@ fn now_unix_ms_local() -> u128 {
 mod tests {
     use bytes::Bytes;
     use roxy_core::model::now_unix_ms;
+    use std::{fs, path::PathBuf};
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::{
         AppState, CapturedRequest, CapturedResponse, UiModuleRegistry, apply_plugin_output_ops,
-        apply_request_middleware_output, apply_response_middleware_output, parse_bool_env_value,
-        parse_cli_options_from_args,
+        apply_request_middleware_output, apply_response_middleware_output, discover_plugin_scripts,
+        parse_bool_env_value, parse_cli_options_from_args,
     };
 
     #[test]
@@ -738,6 +778,30 @@ mod tests {
     fn parse_cli_options_rejects_unknown_flag() {
         let err = parse_cli_options_from_args(vec!["--wat".to_string()]).expect_err("should fail");
         assert!(err.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn discover_plugin_scripts_finds_nested_python_files() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let nested = root.join("string_substitute");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        fs::create_dir_all(root.join("__pycache__")).expect("create pycache");
+
+        let plugin = nested.join("string_substitute.py");
+        fs::write(&plugin, b"print('ok')").expect("write plugin");
+        fs::write(root.join("__pycache__/ignored.py"), b"print('ignored')").expect("write cached");
+        fs::write(root.join("README.txt"), b"not-a-plugin").expect("write txt");
+
+        let scripts = discover_plugin_scripts(root).expect("discover scripts");
+        let scripts = scripts
+            .into_iter()
+            .map(|path| path.canonicalize().expect("canonicalize"))
+            .collect::<Vec<PathBuf>>();
+        assert_eq!(
+            scripts,
+            vec![plugin.canonicalize().expect("canonicalize plugin")]
+        );
     }
 
     #[test]

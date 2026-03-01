@@ -15,10 +15,16 @@
           <button class="tab active" data-tab="target">Target</button>
           <button class="tab" data-tab="proxy">Proxy</button>
           {% for module in modules %}
+          {% if not module.nav_hidden %}
           <button class="tab" data-tab="{{ module.id }}">{{ module.title }}</button>
+          {% endif %}
           {% endfor %}
           <button class="tab" data-tab="settings">Settings</button>
         </nav>
+        <div id="plugins-tab-menu" class="plugins-tab-menu" hidden>
+          <div class="plugins-tab-menu-title">Select Plugin</div>
+          <div id="plugins-tab-menu-items" class="plugins-tab-menu-items"></div>
+        </div>
         <div class="chrome-tools">
           <div class="health-wrap">
             <span class="health-dot" id="health-dot" aria-hidden="true"></span>
@@ -164,9 +170,11 @@
         </section>
 
         {% for module in modules %}
+        {% if not module.nav_hidden %}
         <section class="panel" id="tab-{{ module.id }}">
           {{ module.panel_html | safe }}
         </section>
+        {% endif %}
         {% endfor %}
 
         <section class="panel" id="tab-settings">

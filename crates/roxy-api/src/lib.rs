@@ -154,6 +154,7 @@ struct RegisterPluginRequest {
 struct RegisterUiModuleRequest {
     id: String,
     title: String,
+    nav_hidden: Option<bool>,
     panel_html: String,
     settings_html: String,
     script_js: String,
@@ -592,6 +593,7 @@ async fn register_ui_module(
     state.ui_modules.register(web_modules::UiModule {
         id: req.id.trim().to_string(),
         title: req.title.trim().to_string(),
+        nav_hidden: req.nav_hidden.unwrap_or(false),
         panel_html: req.panel_html.clone(),
         settings_html: req.settings_html.clone(),
         script_js: req.script_js.clone(),
@@ -1098,6 +1100,10 @@ fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &
         ui_modules.register(web_modules::UiModule {
             id: id.to_string(),
             title: title.to_string(),
+            nav_hidden: module
+                .get("nav_hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),

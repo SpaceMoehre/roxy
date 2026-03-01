@@ -98,6 +98,7 @@ body {
 }
 
 .chrome {
+  position: relative;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: linear-gradient(160deg, var(--panel-2), var(--panel));
@@ -135,6 +136,47 @@ body {
   color: #fff;
   border-color: transparent;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.tab.plugins-open {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.plugins-tab-menu {
+  position: absolute;
+  z-index: 10;
+  min-width: 240px;
+  max-width: min(380px, 92vw);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  box-shadow: var(--shadow);
+  padding: 7px;
+}
+
+.plugins-tab-menu-title {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 6px;
+}
+
+.plugins-tab-menu-items {
+  display: grid;
+  gap: 4px;
+  max-height: min(42vh, 360px);
+  overflow: auto;
+}
+
+.plugins-tab-menu-item {
+  width: 100%;
+  height: 30px;
+  justify-content: flex-start;
+  text-align: left;
+  border-radius: 7px;
 }
 
 .chrome-tools {
@@ -364,6 +406,13 @@ body {
   display: grid;
   gap: 8px;
   grid-template-columns: 1fr 1fr;
+}
+
+.plugins-substitution-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) 110px auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .toggle-row {
@@ -662,6 +711,10 @@ select:focus-visible,
   }
 
   .inline-form {
+    grid-template-columns: 1fr;
+  }
+
+  .plugins-substitution-row {
     grid-template-columns: 1fr;
   }
 

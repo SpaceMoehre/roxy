@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct UiModule {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub nav_hidden: bool,
     pub panel_html: String,
     pub settings_html: String,
     pub script_js: String,
@@ -22,6 +24,7 @@ impl UiModule {
         Self {
             id: id.to_string(),
             title: title.to_string(),
+            nav_hidden: false,
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),

@@ -1,6 +1,7 @@
 const apiBase = '/api/v1';
 const UI_SETTINGS_STORAGE_KEY = 'roxy-ui-settings-v1';
 const SETTINGS_ACCORDION_STORAGE_KEY = 'roxy-settings-accordion-v1';
+const PLUGIN_SELECTION_STORAGE_KEY = 'roxy-selected-plugin-v1';
 
 const appState = {
   selectedRequest: null,
@@ -221,13 +222,20 @@ function applyThemePreference() {
 function renderTabs() {
   const tabs = Array.from(document.querySelectorAll('.tab'));
   for (const tab of tabs) {
-    tab.addEventListener('click', () => {
-      activateTab(tab.dataset.tab);
+    tab.addEventListener('click', async () => {
+      const tabName = tab.dataset.tab;
+      if (tabName === 'plugins') {
+        await togglePluginsTopMenu();
+        return;
+      }
+      closePluginsTopMenu();
+      activateTab(tabName);
     });
   }
 }
 
 function activateTab(tabName) {
+  closePluginsTopMenu();
   const tabs = Array.from(document.querySelectorAll('.tab'));
   const panels = Array.from(document.querySelectorAll('.panel'));
   for (const t of tabs) t.classList.remove('active');
@@ -237,6 +245,121 @@ function activateTab(tabName) {
   if (selectedTab) selectedTab.classList.add('active');
   const selectedPanel = qs(`tab-${tabName}`);
   if (selectedPanel) selectedPanel.classList.add('active');
+}
+
+function pluginTabButton() {
+  return document.querySelector('.tab[data-tab="plugins"]');
+}
+
+function selectedPluginFromStorage() {
+  return localStorage.getItem(PLUGIN_SELECTION_STORAGE_KEY) || '';
+}
+
+function setSelectedPlugin(pluginName) {
+  if (!pluginName) {
+    localStorage.removeItem(PLUGIN_SELECTION_STORAGE_KEY);
+    window.__roxySelectedPlugin = '';
+    return;
+  }
+  localStorage.setItem(PLUGIN_SELECTION_STORAGE_KEY, pluginName);
+  window.__roxySelectedPlugin = pluginName;
+}
+
+function closePluginsTopMenu() {
+  const menu = qs('plugins-tab-menu');
+  if (!menu) {
+    return;
+  }
+  menu.hidden = true;
+  pluginTabButton()?.classList.remove('plugins-open');
+}
+
+function positionPluginsTopMenu() {
+  const menu = qs('plugins-tab-menu');
+  const anchor = pluginTabButton();
+  const chrome = document.querySelector('.chrome');
+  if (!menu || !anchor || !chrome) {
+    return;
+  }
+
+  const chromeRect = chrome.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const top = anchorRect.bottom - chromeRect.top + 6;
+  let left = anchorRect.left - chromeRect.left;
+  const menuWidth = Math.max(240, Math.min(380, chromeRect.width - 16));
+  if (left + menuWidth > chromeRect.width - 8) {
+    left = chromeRect.width - menuWidth - 8;
+  }
+  menu.style.top = `${Math.max(6, top)}px`;
+  menu.style.left = `${Math.max(8, left)}px`;
+}
+
+async function renderPluginsTopMenuItems() {
+  const container = qs('plugins-tab-menu-items');
+  if (!container) {
+    return false;
+  }
+
+  let plugins = [];
+  try {
+    plugins = await api('/plugins');
+  } catch {
+    return false;
+  }
+
+  container.innerHTML = '';
+  if (!Array.isArray(plugins) || plugins.length === 0) {
+    return false;
+  }
+
+  for (const plugin of plugins) {
+    const name = plugin.name;
+    if (!name) {
+      continue;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'plugins-tab-menu-item';
+    button.textContent = name;
+    button.addEventListener('click', () => {
+      setSelectedPlugin(name);
+      closePluginsTopMenu();
+      activateTab('plugins');
+      const select = qs('plugins-select');
+      if (select) {
+        select.value = name;
+        select.dispatchEvent(new Event('change'));
+      }
+    });
+    container.appendChild(button);
+  }
+
+  return container.children.length > 0;
+}
+
+async function togglePluginsTopMenu() {
+  const menu = qs('plugins-tab-menu');
+  const anchor = pluginTabButton();
+  if (!menu || !anchor) {
+    activateTab('plugins');
+    return;
+  }
+
+  if (!menu.hidden) {
+    closePluginsTopMenu();
+    return;
+  }
+
+  const hasItems = await renderPluginsTopMenuItems();
+  if (!hasItems) {
+    closePluginsTopMenu();
+    activateTab('plugins');
+    return;
+  }
+
+  menu.hidden = false;
+  anchor.classList.add('plugins-open');
+  positionPluginsTopMenu();
 }
 
 function renderProxySubtabs() {
@@ -883,12 +1006,39 @@ function bindEvents() {
       toast(`CA regeneration failed: ${err.message}`);
     }
   });
+
+  document.addEventListener('click', (event) => {
+    const menu = qs('plugins-tab-menu');
+    const anchor = pluginTabButton();
+    if (!menu || menu.hidden) {
+      return;
+    }
+    const target = event.target;
+    if (menu.contains(target) || (anchor && anchor.contains(target))) {
+      return;
+    }
+    closePluginsTopMenu();
+  });
+
+  window.addEventListener('resize', () => {
+    const menu = qs('plugins-tab-menu');
+    if (menu && !menu.hidden) {
+      positionPluginsTopMenu();
+    }
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closePluginsTopMenu();
+    }
+  });
 }
 
 async function init() {
   renderTabs();
   renderProxySubtabs();
   initSettingsAccordion();
+  window.__roxySelectedPlugin = selectedPluginFromStorage();
   setProxyHistoryMode('both');
   bindEvents();
   applyThemePreference();

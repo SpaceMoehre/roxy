@@ -217,7 +217,7 @@ Included:
 pip install ./python/roxy-plugin-sdk
 ```
 
-- Demo plugin: `plugins/demo_substitute.py` (request/response string substitution middleware + module registration).
+- Demo plugin: `plugins/string_substitute/string_substitute.py` (request/response string substitution middleware + module registration).
 
 ## Current Status and Roadmap
 

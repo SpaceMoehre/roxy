@@ -1,0 +1,10 @@
+.git
+.gitignore
+target
+.roxy-data
+
+**/__pycache__
+**/*.pyc
+
+scripts
+Prompt.md

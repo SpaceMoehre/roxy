@@ -16,6 +16,7 @@ class UiModuleDefinition:
     panel_html: str
     settings_html: str
     script_js: str
+    nav_hidden: bool = False
 
 
 class PluginBuilder:

@@ -10,18 +10,16 @@
   </div>
 
   <div class="split-grid">
-    <section class="card compact" id="plugins-demo-settings">
-      <h4>Demo Substitution Settings</h4>
-      <div class="stack">
-        <label for="plugins-demo-request-search">Request Search</label>
-        <input id="plugins-demo-request-search" placeholder="hello" />
-        <label for="plugins-demo-request-replace">Request Replace</label>
-        <input id="plugins-demo-request-replace" placeholder="roxy" />
-        <label for="plugins-demo-response-search">Response Search</label>
-        <input id="plugins-demo-response-search" placeholder="upstream-ok" />
-        <label for="plugins-demo-response-replace">Response Replace</label>
-        <input id="plugins-demo-response-replace" placeholder="plugin-ok" />
+    <section class="card compact" id="plugins-string-substitute-settings">
+      <div class="panel-head">
+        <h4>String Substitution Rules</h4>
+        <button id="plugins-string-substitute-add-rule">Add Rule</button>
       </div>
+      <p class="hint">
+        Rules are applied sequentially. Scope can be <code>request</code>, <code>response</code>,
+        or <code>both</code>.
+      </p>
+      <div id="plugins-string-substitute-rules" class="stack"></div>
     </section>
 
     <section class="card compact">
