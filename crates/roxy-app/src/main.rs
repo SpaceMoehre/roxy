@@ -15,8 +15,8 @@ use roxy_api::{
     ws::{WsHub, run_ws_server_with_shutdown_and_ready_uds},
 };
 use roxy_core::{
-    AppState, CapturedRequest, CapturedResponse, CertManager, DebugLoggingConfig, EventEnvelope,
-    HeaderValuePair, IntruderManager, ProxyConfig, ProxyEngine, ProxyMiddleware,
+    AppState, AppStateEvent, CapturedRequest, CapturedResponse, CertManager, DebugLoggingConfig,
+    EventEnvelope, HeaderValuePair, IntruderManager, ProxyConfig, ProxyEngine, ProxyMiddleware,
 };
 use roxy_plugin::{PluginAlteration, PluginInvocation, PluginManager, PluginRegistration};
 use roxy_storage::StorageManager;
@@ -258,6 +258,22 @@ async fn main() -> Result<()> {
     let _intruder_event_dispatch = tokio::spawn(async move {
         while let Ok(event) = intruder_events.recv().await {
             ws_hub_intruder.publish(&event);
+        }
+    });
+
+    let mut app_state_events = app_state.subscribe_events();
+    let ws_hub_state = ws_hub.clone();
+    let _app_state_event_dispatch = tokio::spawn(async move {
+        while let Ok(event) = app_state_events.recv().await {
+            match event {
+                AppStateEvent::ProxyToggles(_)
+                | AppStateEvent::PendingIntercepts(_)
+                | AppStateEvent::SiteMapUpdated(_)
+                | AppStateEvent::ScopeUpdated(_)
+                | AppStateEvent::UpstreamProxySettingsUpdated(_) => {
+                    ws_hub_state.publish(&event);
+                }
+            }
         }
     });
 

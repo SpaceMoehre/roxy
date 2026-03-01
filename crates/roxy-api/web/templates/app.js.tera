@@ -14,6 +14,8 @@ const appState = {
   proxyHistoryRows: [],
   proxyHistoryMode: 'both',
   upstreamSettingsSaveTimer: null,
+  ws: null,
+  wsReconnectTimer: null,
   toastTimer: null,
   settings: loadUiSettings(),
 };
@@ -1006,54 +1008,61 @@ async function loadHealth() {
   }
 }
 
+function renderSiteMapRows(rows) {
+  const root = qs('site-map');
+  root.innerHTML = '';
+  if (!rows.length) {
+    root.innerHTML = '<div class="scroll-item">Site map is empty.</div>';
+    return;
+  }
+
+  for (const row of rows) {
+    const host = document.createElement('div');
+    host.className = 'scroll-item';
+    host.innerHTML = `<strong>${row.host}</strong><br>${row.paths.join('<br>')}`;
+    root.appendChild(host);
+  }
+}
+
 async function loadSiteMap() {
   try {
     const rows = await api('/target/site-map');
-    const root = qs('site-map');
-    root.innerHTML = '';
-    if (!rows.length) {
-      root.innerHTML = '<div class="scroll-item">Site map is empty.</div>';
-      return;
-    }
-
-    for (const row of rows) {
-      const host = document.createElement('div');
-      host.className = 'scroll-item';
-      host.innerHTML = `<strong>${row.host}</strong><br>${row.paths.join('<br>')}`;
-      root.appendChild(host);
-    }
+    renderSiteMapRows(Array.isArray(rows) ? rows : []);
   } catch (err) {
     toast(`Site map load failed: ${err.message}`);
+  }
+}
+
+function renderScopeHosts(hosts) {
+  const root = qs('scope-list');
+  root.innerHTML = '';
+
+  if (!hosts || !hosts.length) {
+    root.innerHTML = '<div class="scroll-item">Scope empty (all hosts allowed).</div>';
+    return;
+  }
+
+  for (const host of hosts) {
+    const row = document.createElement('div');
+    row.className = 'scroll-item';
+    row.innerHTML = `<strong>${host}</strong>`;
+    row.addEventListener('click', async () => {
+      try {
+        await api(`/target/scope/${encodeURIComponent(host)}`, { method: 'DELETE' });
+        await loadScope();
+        toast(`Removed scope: ${host}`);
+      } catch (err) {
+        toast(`Remove scope failed: ${err.message}`);
+      }
+    });
+    root.appendChild(row);
   }
 }
 
 async function loadScope() {
   try {
     const data = await api('/target/scope');
-    const root = qs('scope-list');
-    root.innerHTML = '';
-
-    if (!data.hosts || !data.hosts.length) {
-      root.innerHTML = '<div class="scroll-item">Scope empty (all hosts allowed).</div>';
-      return;
-    }
-
-    for (const host of data.hosts) {
-      const row = document.createElement('div');
-      row.className = 'scroll-item';
-      row.innerHTML = `<strong>${host}</strong>`;
-      row.addEventListener('click', async () => {
-        try {
-          await api(`/target/scope/${encodeURIComponent(host)}`, { method: 'DELETE' });
-          await loadScope();
-          await loadSiteMap();
-          toast(`Removed scope: ${host}`);
-        } catch (err) {
-          toast(`Remove scope failed: ${err.message}`);
-        }
-      });
-      root.appendChild(row);
-    }
+    renderScopeHosts(data.hosts || []);
   } catch (err) {
     toast(`Scope load failed: ${err.message}`);
   }
@@ -1229,58 +1238,64 @@ function fillResponseForm(response) {
   qs('response-body').value = decodeBodyField(response.body);
 }
 
+function renderInterceptQueues(requests, responses) {
+  const selectedRequestId = appState.selectedRequest?.id;
+  const selectedResponseId = appState.selectedResponse?.request_id;
+
+  const nextSelectedRequest = requests.find((item) => item.id === selectedRequestId)
+    || requests[0]
+    || null;
+  const nextSelectedResponse = responses.find((item) => item.request_id === selectedResponseId)
+    || responses[0]
+    || null;
+
+  appState.selectedRequest = nextSelectedRequest;
+  appState.selectedResponse = nextSelectedResponse;
+
+  if (nextSelectedRequest) {
+    fillRequestForm(nextSelectedRequest);
+  }
+  if (nextSelectedResponse) {
+    fillResponseForm(nextSelectedResponse);
+  }
+
+  renderList(
+    'request-queue',
+    requests,
+    (item) => {
+      const firstLine = requestBlobText(item).split(/\r?\n/, 1)[0];
+      return `<strong>${firstLine || 'request'}</strong><br><small>${item.id}</small>`;
+    },
+    (item) => {
+      appState.selectedRequest = item;
+      fillRequestForm(item);
+      loadInterceptQueues();
+    },
+    nextSelectedRequest?.id,
+  );
+
+  renderList(
+    'response-queue',
+    responses,
+    (item) => `<strong>${item.status}</strong> response<br><small>${item.request_id}</small>`,
+    (item) => {
+      appState.selectedResponse = item;
+      fillResponseForm(item);
+      loadInterceptQueues();
+    },
+    nextSelectedResponse?.request_id,
+  );
+}
+
 async function loadInterceptQueues() {
   try {
     const [requests, responses] = await Promise.all([
       api('/proxy/intercepts'),
       api('/proxy/response-intercepts'),
     ]);
-
-    const selectedRequestId = appState.selectedRequest?.id;
-    const selectedResponseId = appState.selectedResponse?.request_id;
-
-    const nextSelectedRequest = requests.find((item) => item.id === selectedRequestId)
-      || requests[0]
-      || null;
-    const nextSelectedResponse = responses.find((item) => item.request_id === selectedResponseId)
-      || responses[0]
-      || null;
-
-    appState.selectedRequest = nextSelectedRequest;
-    appState.selectedResponse = nextSelectedResponse;
-
-    if (nextSelectedRequest) {
-      fillRequestForm(nextSelectedRequest);
-    }
-    if (nextSelectedResponse) {
-      fillResponseForm(nextSelectedResponse);
-    }
-
-    renderList(
-      'request-queue',
-      requests,
-      (item) => {
-        const firstLine = requestBlobText(item).split(/\r?\n/, 1)[0];
-        return `<strong>${firstLine || 'request'}</strong><br><small>${item.id}</small>`;
-      },
-      (item) => {
-        appState.selectedRequest = item;
-        fillRequestForm(item);
-        loadInterceptQueues();
-      },
-      nextSelectedRequest?.id,
-    );
-
-    renderList(
-      'response-queue',
-      responses,
-      (item) => `<strong>${item.status}</strong> response<br><small>${item.request_id}</small>`,
-      (item) => {
-        appState.selectedResponse = item;
-        fillResponseForm(item);
-        loadInterceptQueues();
-      },
-      nextSelectedResponse?.request_id,
+    renderInterceptQueues(
+      Array.isArray(requests) ? requests : [],
+      Array.isArray(responses) ? responses : [],
     );
   } catch (err) {
     toast(`Queue load failed: ${err.message}`);
@@ -1340,14 +1355,181 @@ async function continueResponse(decision) {
   await loadInterceptQueues();
 }
 
-function invokeModuleHook(moduleId, hookName) {
+function applyProxyTogglesSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return;
+  }
+  if (qs('toggle-intercept')) {
+    qs('toggle-intercept').checked = Boolean(snapshot.intercept_enabled);
+  }
+  if (qs('toggle-intercept-response')) {
+    qs('toggle-intercept-response').checked = Boolean(snapshot.intercept_response_enabled);
+  }
+  if (qs('toggle-mitm')) {
+    qs('toggle-mitm').checked = Boolean(snapshot.mitm_enabled);
+  }
+}
+
+function applyPendingInterceptSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return;
+  }
+  const requests = Array.isArray(snapshot.requests) ? snapshot.requests : [];
+  const responses = Array.isArray(snapshot.responses) ? snapshot.responses : [];
+  renderInterceptQueues(requests, responses);
+}
+
+function applyUpstreamSettingsSnapshot(settings) {
+  if (!settings || typeof settings !== 'object') {
+    return;
+  }
+  if (!qs('setting-upstream-proxy-list')) {
+    return;
+  }
+  qs('setting-upstream-proxy-list').value = formatUpstreamProxyList(settings.proxies || []);
+  qs('setting-upstream-proxy-dns').checked = Boolean(settings.proxy_dns);
+  qs('setting-upstream-chain-mode').value = settings.chain_mode || 'strict_chain';
+  qs('setting-upstream-min-chain-length').value = String(
+    Math.max(1, Number(settings.min_chain_length || 1)),
+  );
+  qs('setting-upstream-max-chain-length').value = String(
+    Math.max(1, Number(settings.max_chain_length || 1)),
+  );
+  syncUpstreamRandomFieldsVisibility();
+}
+
+function applyExchangeEvent(exchange) {
+  if (!exchange || !exchange.request || !exchange.request.id) {
+    return;
+  }
+  const row = {
+    id: exchange.request.id,
+    exchange,
+  };
+  appState.proxyHistoryRows = [
+    row,
+    ...appState.proxyHistoryRows.filter((existing) => existing.id !== row.id),
+  ].slice(0, 300);
+
+  if (!appState.selectedProxyHistoryId) {
+    appState.selectedProxyHistoryId = row.id;
+  }
+
+  renderProxyHistoryList();
+  renderProxyHistoryDetail();
+}
+
+function wsUrlForCurrentPage() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws`;
+}
+
+function scheduleRealtimeReconnect() {
+  clearTimeout(appState.wsReconnectTimer);
+  appState.wsReconnectTimer = setTimeout(() => {
+    connectRealtimeStream();
+  }, 1000);
+}
+
+function handleRealtimeEvent(message) {
+  const event = message && typeof message === 'object' ? message : null;
+  if (!event || typeof event.event !== 'string') {
+    return;
+  }
+
+  switch (event.event) {
+    case 'exchange':
+      applyExchangeEvent(event.payload);
+      break;
+    case 'pending_intercepts':
+      applyPendingInterceptSnapshot(event.payload);
+      break;
+    case 'proxy_toggles':
+      applyProxyTogglesSnapshot(event.payload);
+      break;
+    case 'site_map_updated':
+      if (event.payload && Array.isArray(event.payload.rows)) {
+        renderSiteMapRows(event.payload.rows);
+      }
+      break;
+    case 'scope_updated':
+      if (event.payload && Array.isArray(event.payload.hosts)) {
+        renderScopeHosts(event.payload.hosts);
+      }
+      break;
+    case 'upstream_proxy_settings_updated':
+      applyUpstreamSettingsSnapshot(event.payload);
+      break;
+    case 'job_updated':
+    case 'job_result':
+      invokeModuleHook('intruder', 'refresh');
+      break;
+    default:
+      break;
+  }
+
+  for (const moduleId of moduleRegistry.keys()) {
+    invokeModuleHook(moduleId, 'onRealtimeEvent', event);
+  }
+}
+
+function connectRealtimeStream() {
+  if (appState.ws && (appState.ws.readyState === WebSocket.OPEN || appState.ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  let ws;
+  try {
+    ws = new WebSocket(wsUrlForCurrentPage());
+  } catch {
+    scheduleRealtimeReconnect();
+    return;
+  }
+
+  appState.ws = ws;
+
+  ws.addEventListener('open', () => {
+    if (appState.ws !== ws) {
+      return;
+    }
+    setHealth(true, 'Realtime connected');
+  });
+
+  ws.addEventListener('message', (incoming) => {
+    if (appState.ws !== ws) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(incoming.data);
+      handleRealtimeEvent(parsed);
+    } catch {
+      // Ignore malformed websocket payloads.
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    if (appState.ws === ws) {
+      appState.ws = null;
+      setHealth(false, 'Realtime disconnected');
+      scheduleRealtimeReconnect();
+    }
+  });
+
+  ws.addEventListener('error', () => {
+    if (appState.ws === ws) {
+      ws.close();
+    }
+  });
+}
+
+function invokeModuleHook(moduleId, hookName, ...args) {
   const moduleDef = moduleRegistry.get(moduleId);
   if (!moduleDef || typeof moduleDef[hookName] !== 'function') {
     return Promise.resolve();
   }
   const ctx = moduleContext(moduleId);
   try {
-    const result = moduleDef[hookName](ctx);
+    const result = moduleDef[hookName](ctx, ...args);
     return Promise.resolve(result);
   } catch (err) {
     toast(`Module ${moduleId} ${hookName} failed: ${err.message}`);
@@ -1565,6 +1747,13 @@ function bindEvents() {
       closePluginsTopMenu();
     }
   });
+
+  window.addEventListener('beforeunload', () => {
+    clearTimeout(appState.wsReconnectTimer);
+    if (appState.ws && appState.ws.readyState === WebSocket.OPEN) {
+      appState.ws.close();
+    }
+  });
 }
 
 async function init() {
@@ -1590,9 +1779,7 @@ async function init() {
 
   await initializeModules();
 
-  setInterval(loadHealth, 10000);
-  setInterval(loadInterceptQueues, 5000);
-  setInterval(loadProxyHistory, 5000);
+  connectRealtimeStream();
 }
 
 {{ module_scripts | safe }}

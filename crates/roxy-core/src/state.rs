@@ -6,7 +6,7 @@ use std::sync::{
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::model::{CapturedRequest, CapturedResponse, RequestMutation, ResponseMutation};
@@ -56,6 +56,45 @@ pub struct UpstreamProxySettings {
     pub chain_mode: UpstreamChainMode,
     pub min_chain_length: usize,
     pub max_chain_length: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyToggleSnapshot {
+    pub intercept_enabled: bool,
+    pub intercept_response_enabled: bool,
+    pub mitm_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingInterceptSnapshot {
+    pub requests: Vec<CapturedRequest>,
+    pub responses: Vec<CapturedResponse>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteMapEntry {
+    pub host: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SiteMapSnapshot {
+    pub rows: Vec<SiteMapEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScopeSnapshot {
+    pub hosts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "event", content = "payload", rename_all = "snake_case")]
+pub enum AppStateEvent {
+    ProxyToggles(ProxyToggleSnapshot),
+    PendingIntercepts(PendingInterceptSnapshot),
+    SiteMapUpdated(SiteMapSnapshot),
+    ScopeUpdated(ScopeSnapshot),
+    UpstreamProxySettingsUpdated(UpstreamProxySettings),
 }
 
 impl Default for UpstreamProxySettings {
@@ -173,6 +212,7 @@ pub struct AppState {
     site_map: DashMap<String, DashSet<String>>,
     scope_hosts: DashSet<String>,
     upstream_proxy_settings: RwLock<UpstreamProxySettings>,
+    events_tx: broadcast::Sender<AppStateEvent>,
 }
 
 impl Default for AppState {
@@ -183,6 +223,7 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let (events_tx, _) = broadcast::channel(2048);
         Self {
             intercept_enabled: AtomicBool::new(false),
             intercept_response_enabled: AtomicBool::new(false),
@@ -192,6 +233,46 @@ impl AppState {
             site_map: DashMap::new(),
             scope_hosts: DashSet::new(),
             upstream_proxy_settings: RwLock::new(UpstreamProxySettings::default()),
+            events_tx,
+        }
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<AppStateEvent> {
+        self.events_tx.subscribe()
+    }
+
+    fn publish_event(&self, event: AppStateEvent) {
+        let _ = self.events_tx.send(event);
+    }
+
+    fn proxy_toggle_snapshot(&self) -> ProxyToggleSnapshot {
+        ProxyToggleSnapshot {
+            intercept_enabled: self.intercept_enabled(),
+            intercept_response_enabled: self.intercept_response_enabled(),
+            mitm_enabled: self.mitm_enabled(),
+        }
+    }
+
+    fn pending_intercepts_snapshot(&self) -> PendingInterceptSnapshot {
+        PendingInterceptSnapshot {
+            requests: self.pending_requests(),
+            responses: self.pending_responses(),
+        }
+    }
+
+    fn site_map_snapshot(&self) -> SiteMapSnapshot {
+        SiteMapSnapshot {
+            rows: self
+                .site_map()
+                .into_iter()
+                .map(|(host, paths)| SiteMapEntry { host, paths })
+                .collect(),
+        }
+    }
+
+    fn scope_snapshot(&self) -> ScopeSnapshot {
+        ScopeSnapshot {
+            hosts: self.scope_hosts(),
         }
     }
 
@@ -204,6 +285,10 @@ impl AppState {
         if !enabled {
             self.flush_pending_intercepts_forward();
         }
+        self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
     }
 
     pub fn intercept_response_enabled(&self) -> bool {
@@ -213,6 +298,7 @@ impl AppState {
     pub fn set_intercept_response_enabled(&self, enabled: bool) {
         self.intercept_response_enabled
             .store(enabled, Ordering::Relaxed);
+        self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
     pub fn mitm_enabled(&self) -> bool {
@@ -221,6 +307,7 @@ impl AppState {
 
     pub fn set_mitm_enabled(&self, enabled: bool) {
         self.mitm_enabled.store(enabled, Ordering::Relaxed);
+        self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
     pub fn enqueue_intercept(
@@ -230,6 +317,9 @@ impl AppState {
         let id = request.id;
         let (pending, rx) = PendingIntercept::new(request);
         self.pending_intercepts.insert(id, pending);
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
         rx
     }
 
@@ -242,7 +332,11 @@ impl AppState {
             .pending_intercepts
             .remove(&id)
             .ok_or(StateError::NotFound)?;
-        entry.1.resolve(decision)
+        let result = entry.1.resolve(decision);
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
+        result
     }
 
     pub fn pending_requests(&self) -> Vec<CapturedRequest> {
@@ -266,6 +360,9 @@ impl AppState {
                 let _ = pending.resolve(InterceptDecision::Forward);
             }
         }
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
     }
 
     pub fn enqueue_response_intercept(
@@ -275,6 +372,9 @@ impl AppState {
         let id = response.request_id;
         let (pending, rx) = PendingResponseIntercept::new(response);
         self.pending_response_intercepts.insert(id, pending);
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
         rx
     }
 
@@ -287,7 +387,11 @@ impl AppState {
             .pending_response_intercepts
             .remove(&id)
             .ok_or(StateError::NotFound)?;
-        entry.1.resolve(decision)
+        let result = entry.1.resolve(decision);
+        self.publish_event(AppStateEvent::PendingIntercepts(
+            self.pending_intercepts_snapshot(),
+        ));
+        result
     }
 
     pub fn pending_responses(&self) -> Vec<CapturedResponse> {
@@ -306,7 +410,10 @@ impl AppState {
             return;
         }
         let path = path.into();
-        self.site_map.entry(host).or_default().insert(path);
+        let inserted = self.site_map.entry(host).or_default().insert(path);
+        if inserted {
+            self.publish_event(AppStateEvent::SiteMapUpdated(self.site_map_snapshot()));
+        }
     }
 
     pub fn site_map(&self) -> Vec<(String, Vec<String>)> {
@@ -328,18 +435,24 @@ impl AppState {
                 self.scope_hosts.insert(normalized);
             }
         }
+        self.publish_event(AppStateEvent::ScopeUpdated(self.scope_snapshot()));
     }
 
     pub fn add_scope_host(&self, host: String) {
         let normalized = normalize_scope_host(&host);
         if !normalized.is_empty() {
             self.scope_hosts.insert(normalized);
+            self.publish_event(AppStateEvent::ScopeUpdated(self.scope_snapshot()));
         }
     }
 
     pub fn remove_scope_host(&self, host: &str) -> bool {
         let normalized = normalize_scope_host(host);
-        self.scope_hosts.remove(&normalized).is_some()
+        let removed = self.scope_hosts.remove(&normalized).is_some();
+        if removed {
+            self.publish_event(AppStateEvent::ScopeUpdated(self.scope_snapshot()));
+        }
+        removed
     }
 
     pub fn scope_hosts(&self) -> Vec<String> {
@@ -358,6 +471,7 @@ impl AppState {
     pub fn set_upstream_proxy_settings(&self, settings: UpstreamProxySettings) {
         if let Ok(mut value) = self.upstream_proxy_settings.write() {
             *value = settings.normalized();
+            self.publish_event(AppStateEvent::UpstreamProxySettingsUpdated(value.clone()));
         }
     }
 
@@ -475,6 +589,50 @@ mod tests {
             .expect("decision should be present");
 
         assert!(matches!(decision, ResponseInterceptDecision::Forward));
+    }
+
+    #[tokio::test]
+    async fn enqueue_intercept_emits_pending_intercepts_event() {
+        let state = AppState::new();
+        let mut events = state.subscribe_events();
+        let request = fake_request();
+
+        let _rx = state.enqueue_intercept(request.clone());
+
+        let event = timeout(Duration::from_millis(200), events.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event should decode");
+
+        match event {
+            AppStateEvent::PendingIntercepts(snapshot) => {
+                assert_eq!(snapshot.requests.len(), 1);
+                assert_eq!(snapshot.requests[0].id, request.id);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_mitm_emits_proxy_toggles_event() {
+        let state = AppState::new();
+        let mut events = state.subscribe_events();
+
+        state.set_mitm_enabled(false);
+
+        let event = timeout(Duration::from_millis(200), events.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event should decode");
+
+        match event {
+            AppStateEvent::ProxyToggles(snapshot) => {
+                assert!(!snapshot.mitm_enabled);
+                assert!(!snapshot.intercept_enabled);
+                assert!(!snapshot.intercept_response_enabled);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
