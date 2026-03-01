@@ -45,7 +45,7 @@ async fn proxy_intercept_and_history_flow() {
     let ws_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy-app"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
         .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
         .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
@@ -54,7 +54,7 @@ async fn proxy_intercept_and_history_flow() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = child.spawn().expect("failed to spawn roxy-app");
+    let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
     let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
@@ -164,7 +164,7 @@ async fn proxy_https_ifconfig_captured_in_roxy_api() {
     let ws_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy-app"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
         .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
         .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
@@ -173,7 +173,7 @@ async fn proxy_https_ifconfig_captured_in_roxy_api() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = child.spawn().expect("failed to spawn roxy-app");
+    let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
     let api_base = format!("http://127.0.0.1:{api_port}/api/v1");
@@ -270,7 +270,7 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
     let ws_port = reserve_port();
     let data_dir = TempDir::new().expect("temp dir");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy-app"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
     child
         .env("ROXY_PROXY_BIND", format!("127.0.0.1:{proxy_port}"))
         .env("ROXY_API_BIND", format!("127.0.0.1:{api_port}"))
@@ -279,7 +279,7 @@ async fn proxy_decodes_zstd_response_for_client_and_history() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = child.spawn().expect("failed to spawn roxy-app");
+    let child = child.spawn().expect("failed to spawn roxy");
     let _child_guard = ChildGuard::new(child);
 
     let api_base = format!("http://127.0.0.1:{api_port}/api/v1");

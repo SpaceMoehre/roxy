@@ -1,5 +1,5 @@
 [package]
-name = "roxy-app"
+name = "roxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

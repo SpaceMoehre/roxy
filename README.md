@@ -68,7 +68,7 @@ flowchart LR
 | `crates/roxy-storage` | Exchange persistence + history search/list |
 | `crates/roxy-api` | HTTP API + embedded web assets + WS server |
 | `crates/roxy-plugin` | Python plugin process interface |
-| `crates/roxy-app` | Composition binary and task orchestration |
+| `crates/roxy` | Composition binary and task orchestration |
 
 ## Quick Start
 
@@ -181,7 +181,7 @@ cargo test --all
 Ignored tests are provided for true runtime scenarios (process startup, live proxying, history verification):
 
 ```bash
-cargo test -p roxy-app -- --ignored --nocapture
+cargo test -p roxy -- --ignored --nocapture
 ```
 
 Included:

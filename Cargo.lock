@@ -2100,6 +2100,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ntex",
+ "reqwest",
+ "roxy-api",
+ "roxy-core",
+ "roxy-plugin",
+ "roxy-storage",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
 name = "roxy-api"
 version = "0.1.0"
 dependencies = [
@@ -2119,25 +2138,6 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "roxy-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ntex",
- "reqwest",
- "roxy-api",
- "roxy-core",
- "roxy-plugin",
- "roxy-storage",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]

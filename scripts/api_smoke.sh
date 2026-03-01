@@ -22,7 +22,7 @@ cd "$REPO_ROOT"
 ROXY_API_BIND="$API_BIND" \
 ROXY_PROXY_BIND="$PROXY_BIND" \
 ROXY_DATA_DIR="$DATA_DIR" \
-cargo run -p roxy-app >"$LOG_FILE" 2>&1 &
+cargo run -p roxy >"$LOG_FILE" 2>&1 &
 APP_PID=$!
 
 for _ in $(seq 1 240); do
