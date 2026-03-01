@@ -20,4 +20,7 @@ pub use model::{
 };
 pub use proxy::ProxyEngine;
 pub use raw_http::{ParsedRequestBlob, build_request_blob, parse_request_blob};
-pub use state::{AppState, InterceptDecision, ResponseInterceptDecision, StateError};
+pub use state::{
+    AppState, InterceptDecision, ResponseInterceptDecision, StateError, UpstreamChainMode,
+    UpstreamProxyEntry, UpstreamProxyProtocol, UpstreamProxySettings,
+};

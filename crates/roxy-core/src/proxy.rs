@@ -4,7 +4,8 @@ use std::{
     io,
     io::Read,
     net::SocketAddr,
-    sync::{Arc, Once},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::{Arc, Once, OnceLock},
     time::Instant,
 };
 
@@ -14,17 +15,16 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{HeaderName, HeaderValue},
+    header::{HOST, HeaderName, HeaderValue},
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use reqwest::Client;
 use tokio::{
-    io::copy_bidirectional,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
 };
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -37,7 +37,10 @@ use crate::{
         apply_mutation, apply_response_mutation, headers_to_pairs, now_unix_ms,
     },
     raw_http::{build_request_blob, parse_request_blob},
-    state::{AppState, InterceptDecision, ResponseInterceptDecision},
+    state::{
+        AppState, InterceptDecision, ResponseInterceptDecision, UpstreamChainMode,
+        UpstreamProxyEntry, UpstreamProxyProtocol, UpstreamProxySettings,
+    },
 };
 
 #[derive(Clone)]
@@ -46,7 +49,6 @@ pub struct ProxyEngine {
     state: Arc<AppState>,
     cert_manager: Arc<CertManager>,
     event_tx: mpsc::Sender<EventEnvelope>,
-    client: Client,
     middleware: Option<Arc<dyn ProxyMiddleware>>,
 }
 
@@ -58,18 +60,12 @@ impl ProxyEngine {
         event_tx: mpsc::Sender<EventEnvelope>,
     ) -> Self {
         ensure_rustls_crypto_provider();
-        let client = Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(config.request_timeout)
-            .build()
-            .expect("reqwest client should build");
 
         Self {
             config,
             state,
             cert_manager,
             event_tx,
-            client,
             middleware: None,
         }
     }
@@ -164,7 +160,11 @@ impl ProxyEngine {
         match self.forward_http_request(request, "http", None).await {
             Ok(response) => Ok(response),
             Err(err) => {
-                error!(%err, "proxy forwarding failed");
+                error!(
+                    error = %err,
+                    error_chain = %format_error_chain(&err),
+                    "proxy forwarding failed"
+                );
                 Ok(build_text_response(
                     StatusCode::BAD_GATEWAY,
                     "upstream forwarding failed",
@@ -192,13 +192,18 @@ impl ProxyEngine {
                             .serve_https_mitm(TokioIo::new(upgraded), authority.clone())
                             .await
                         {
-                            warn!(%err, %authority, "https mitm failed");
+                            warn!(
+                                %authority,
+                                error = %err,
+                                error_chain = %format_error_chain(&err),
+                                "https mitm failed"
+                            );
                         };
                     } else if let Err(err) = engine
                         .tunnel_connect(TokioIo::new(upgraded), authority)
                         .await
                     {
-                        warn!(%err, "connect tunnel failed");
+                        warn!(error = %err, error_chain = %format_error_chain(&err), "connect tunnel failed");
                     }
                 }
                 Err(err) => {
@@ -217,9 +222,12 @@ impl ProxyEngine {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        let mut upstream = TcpStream::connect(&authority)
+        let mut upstream = self
+            .connect_for_connect_tunnel(&authority)
             .await
-            .with_context(|| format!("failed connecting to upstream authority {authority}"))?;
+            .with_context(|| {
+                format!("failed connecting tunnel target via upstream chain: {authority}")
+            })?;
         let _ = copy_bidirectional(&mut upgraded, &mut upstream)
             .await
             .context("CONNECT bidirectional copy failed")?;
@@ -270,7 +278,12 @@ impl ProxyEngine {
                 {
                     Ok(response) => Ok::<_, Infallible>(response),
                     Err(err) => {
-                        error!(%err, "mitm https forwarding failed");
+                        error!(
+                            authority = %authority.as_str(),
+                            error = %err,
+                            error_chain = %format_error_chain(&err),
+                            "mitm https forwarding failed"
+                        );
                         Ok(build_text_response(
                             StatusCode::BAD_GATEWAY,
                             "mitm upstream forwarding failed",
@@ -287,6 +300,95 @@ impl ProxyEngine {
             .context("failed serving mitm TLS http connection")?;
 
         Ok(())
+    }
+
+    fn select_upstream_chain(&self, seed: u64) -> Vec<UpstreamProxyEntry> {
+        let settings = self.state.upstream_proxy_settings();
+        select_upstream_chain_from_settings(&settings, seed)
+    }
+
+    async fn connect_for_connect_tunnel(&self, authority: &str) -> Result<TcpStream> {
+        let settings = self.state.upstream_proxy_settings();
+        let chain = self.select_upstream_chain(hash_seed(authority.as_bytes()));
+        dial_via_upstream_chain(authority, &chain, settings.proxy_dns).await
+    }
+
+    async fn forward_upstream_request(
+        &self,
+        request_id: Uuid,
+        parsed_request: &crate::raw_http::ParsedRequestBlob,
+    ) -> Result<(StatusCode, http::HeaderMap, Bytes)> {
+        let timeout = self.config.request_timeout;
+        tokio::time::timeout(timeout, async {
+            let uri = parsed_request
+                .uri
+                .parse::<http::Uri>()
+                .with_context(|| format!("invalid request URI '{}'", parsed_request.uri))?;
+            let scheme = uri.scheme_str().unwrap_or("http");
+            if scheme != "http" && scheme != "https" {
+                return Err(anyhow!("unsupported request URI scheme '{scheme}'"));
+            }
+            let authority = uri_authority_with_default_port(&uri)?;
+
+            let settings = self.state.upstream_proxy_settings();
+            let chain = self.select_upstream_chain(
+                hash_seed(parsed_request.uri.as_bytes()) ^ request_id.as_u128() as u64,
+            );
+            if self.config.debug_logging.enabled {
+                if chain.is_empty() {
+                    debug!(
+                        request_id = %request_id,
+                        configured_proxies = settings.proxies.len(),
+                        "no upstream proxy chain configured; using direct upstream connection"
+                    );
+                } else {
+                    let chain_desc = chain
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "{}://{}:{}",
+                                upstream_protocol_label(&entry.protocol),
+                                entry.address,
+                                entry.port
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    debug!(
+                        request_id = %request_id,
+                        chain_mode = ?settings.chain_mode,
+                        selected_chain_len = chain.len(),
+                        configured_proxies = settings.proxies.len(),
+                        chain = %chain_desc,
+                        "using upstream proxy chain",
+                    );
+                }
+            }
+
+            let stream = dial_via_upstream_chain(&authority, &chain, settings.proxy_dns).await?;
+            if scheme == "https" {
+                let host = uri
+                    .host()
+                    .ok_or_else(|| anyhow!("request URI missing host"))?;
+                let connector = TlsConnector::from(upstream_tls_client_config());
+                let server_name = tls_server_name_for_host(host)?;
+                let tls_stream = connector
+                    .connect(server_name, stream)
+                    .await
+                    .with_context(|| format!("TLS handshake to upstream host '{host}' failed"))?;
+                return send_http_request_over_stream(tls_stream, parsed_request, &uri, &authority)
+                    .await;
+            }
+
+            send_http_request_over_stream(stream, parsed_request, &uri, &authority).await
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "upstream request timed out after {:?} method={} uri={}",
+                timeout, parsed_request.method, parsed_request.uri
+            )
+        })?
     }
 
     async fn forward_http_request(
@@ -386,7 +488,7 @@ impl ProxyEngine {
         .context("failed parsing request blob for upstream forwarding")?;
         captured_request.method = parsed_request.method.clone();
         captured_request.uri = parsed_request.uri.clone();
-        captured_request.host = parsed_request.host;
+        captured_request.host = parsed_request.host.clone();
         captured_request.headers = parsed_request.headers.clone();
         captured_request.body = parsed_request.body.clone();
         self.log_request_snapshot("forwarding", &captured_request);
@@ -400,31 +502,15 @@ impl ProxyEngine {
         self.state
             .register_site_path(captured_request.host.clone(), parsed_path);
 
-        let mut outbound = self
-            .client
-            .request(parsed_request.method.parse()?, &parsed_request.uri);
-
-        for header in &parsed_request.headers {
-            if header.name.eq_ignore_ascii_case("host")
-                || header.name.eq_ignore_ascii_case("content-length")
-            {
-                continue;
-            }
-            outbound = outbound.header(&header.name, &header.value);
-        }
-
-        let upstream_response = outbound
-            .body(parsed_request.body)
-            .send()
+        let (status, headers, encoded_response_body) = self
+            .forward_upstream_request(request_id, &parsed_request)
             .await
-            .context("upstream request failed")?;
-
-        let status = upstream_response.status();
-        let headers = upstream_response.headers().clone();
-        let encoded_response_body = upstream_response
-            .bytes()
-            .await
-            .context("failed reading upstream response body")?;
+            .with_context(|| {
+                format!(
+                    "upstream request failed request_id={request_id} method={} uri={}",
+                    parsed_request.method, parsed_request.uri
+                )
+            })?;
         let content_encoding = content_encoding_from_headers(&headers);
         let mut response_decoded = false;
         let response_body = match decode_http_body_bytes(
@@ -637,6 +723,533 @@ impl ProxyEngine {
     }
 }
 
+fn select_upstream_chain_from_settings(
+    settings: &UpstreamProxySettings,
+    seed: u64,
+) -> Vec<UpstreamProxyEntry> {
+    if settings.proxies.is_empty() {
+        return Vec::new();
+    }
+
+    let len = settings.proxies.len();
+    let min_len = settings.min_chain_length.max(1).min(len);
+    let max_len = settings.max_chain_length.max(min_len).min(len);
+
+    match settings.chain_mode {
+        UpstreamChainMode::StrictChain => settings.proxies.clone(),
+        UpstreamChainMode::RandomChain => {
+            let mut indices: Vec<usize> = (0..len).collect();
+            let mut state = if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            };
+            let chain_len = if min_len == max_len {
+                min_len
+            } else {
+                state = xorshift64(state);
+                min_len + ((state as usize) % (max_len - min_len + 1))
+            };
+            for i in (1..indices.len()).rev() {
+                state = xorshift64(state);
+                let j = (state as usize) % (i + 1);
+                indices.swap(i, j);
+            }
+            indices
+                .into_iter()
+                .take(chain_len)
+                .map(|idx| settings.proxies[idx].clone())
+                .collect()
+        }
+    }
+}
+
+fn upstream_protocol_label(protocol: &UpstreamProxyProtocol) -> &'static str {
+    match protocol {
+        UpstreamProxyProtocol::Http => "http",
+        UpstreamProxyProtocol::Https => "https",
+        UpstreamProxyProtocol::Socks4 => "socks4",
+        UpstreamProxyProtocol::Socks5 => "socks5",
+    }
+}
+
+async fn dial_via_upstream_chain(
+    authority: &str,
+    chain: &[UpstreamProxyEntry],
+    proxy_dns: bool,
+) -> Result<TcpStream> {
+    if chain.is_empty() {
+        return TcpStream::connect(authority)
+            .await
+            .with_context(|| format!("failed connecting to upstream authority {authority}"));
+    }
+
+    let final_targets = if proxy_dns {
+        vec![authority.to_string()]
+    } else {
+        resolve_authority_candidates(authority).await?
+    };
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for final_target in final_targets {
+        match dial_chain_once(chain, &final_target).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => {
+                last_err = Some(err.context(format!(
+                    "failed dialing upstream chain to resolved target {final_target}"
+                )));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow!("failed dialing upstream chain")))
+}
+
+async fn dial_chain_once(chain: &[UpstreamProxyEntry], final_target: &str) -> Result<TcpStream> {
+    let first = &chain[0];
+    if matches!(first.protocol, UpstreamProxyProtocol::Https) {
+        return Err(anyhow!(
+            "https upstream proxies are not supported for chained dialing yet"
+        ));
+    }
+    let mut stream = TcpStream::connect((first.address.as_str(), first.port))
+        .await
+        .with_context(|| {
+            format!(
+                "failed connecting to first upstream proxy {}:{}",
+                first.address, first.port
+            )
+        })?;
+
+    for (index, proxy) in chain.iter().enumerate() {
+        let target = if index + 1 < chain.len() {
+            let next = &chain[index + 1];
+            format_authority(&next.address, next.port)
+        } else {
+            final_target.to_string()
+        };
+        send_proxy_connect(&mut stream, &proxy.protocol, &target)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed proxy CONNECT at hop={} protocol={} target={}",
+                    index,
+                    upstream_protocol_label(&proxy.protocol),
+                    target
+                )
+            })?;
+    }
+
+    Ok(stream)
+}
+
+async fn send_proxy_connect<T>(
+    stream: &mut T,
+    protocol: &UpstreamProxyProtocol,
+    target: &str,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    match protocol {
+        UpstreamProxyProtocol::Http => send_http_connect(stream, target).await,
+        UpstreamProxyProtocol::Socks4 => send_socks4_connect(stream, target).await,
+        UpstreamProxyProtocol::Socks5 => send_socks5_connect(stream, target).await,
+        UpstreamProxyProtocol::Https => Err(anyhow!(
+            "https upstream proxy protocol is not supported in chained mode"
+        )),
+    }
+}
+
+async fn send_http_request_over_stream<S>(
+    stream: S,
+    parsed_request: &crate::raw_http::ParsedRequestBlob,
+    uri: &http::Uri,
+    authority: &str,
+) -> Result<(StatusCode, http::HeaderMap, Bytes)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let method = parsed_request
+        .method
+        .parse::<Method>()
+        .with_context(|| format!("invalid request method '{}'", parsed_request.method))?;
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path_and_query)
+        .body(Full::new(parsed_request.body.clone()))
+        .context("failed building upstream request object")?;
+
+    let headers = request.headers_mut();
+    let mut has_host = false;
+    for header in &parsed_request.headers {
+        if header.name.eq_ignore_ascii_case("content-length")
+            || header.name.eq_ignore_ascii_case("proxy-connection")
+        {
+            continue;
+        }
+
+        let Ok(name) = HeaderName::from_bytes(header.name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::from_str(&header.value) else {
+            continue;
+        };
+        if name == HOST {
+            has_host = true;
+        }
+        headers.append(name, value);
+    }
+
+    if !has_host {
+        headers.insert(
+            HOST,
+            HeaderValue::from_str(
+                uri.authority()
+                    .map(|auth| auth.as_str())
+                    .unwrap_or(authority),
+            )
+            .context("invalid host header")?,
+        );
+    }
+
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .context("failed opening upstream HTTP/1.1 client connection")?;
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            trace!(%err, "upstream client connection closed with error");
+        }
+    });
+
+    let response = sender
+        .send_request(request)
+        .await
+        .context("failed sending request to upstream")?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .context("failed reading upstream response body")?
+        .to_bytes();
+    Ok((status, headers, body))
+}
+
+fn uri_authority_with_default_port(uri: &http::Uri) -> Result<String> {
+    let host = uri
+        .host()
+        .ok_or_else(|| anyhow!("request URI missing host"))?;
+    let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+        Some("https") => 443,
+        _ => 80,
+    });
+    Ok(format_authority(host, port))
+}
+
+fn tls_server_name_for_host(host: &str) -> Result<rustls::pki_types::ServerName<'static>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(rustls::pki_types::ServerName::IpAddress(ip.into()));
+    }
+    rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| anyhow!("invalid upstream DNS name '{host}'"))
+}
+
+fn upstream_tls_client_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            Arc::new(config)
+        })
+        .clone()
+}
+
+fn hash_seed(input: &[u8]) -> u64 {
+    let mut out: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input {
+        out ^= u64::from(*byte);
+        out = out.wrapping_mul(0x1000_0000_01b3);
+    }
+    out
+}
+
+fn xorshift64(mut x: u64) -> u64 {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
+    let authority = authority
+        .parse::<http::uri::Authority>()
+        .with_context(|| format!("invalid authority '{authority}'"))?;
+    let host = authority.host();
+    let port = authority.port_u16().unwrap_or(443);
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("dns lookup failed for {host}:{port}"))?;
+    let mut addrs: Vec<SocketAddr> = resolved.collect();
+    if addrs.is_empty() {
+        return Err(anyhow!("dns lookup returned no records for {host}:{port}"));
+    }
+    sort_socket_addrs_prefer_ipv4(&mut addrs);
+    Ok(addrs
+        .into_iter()
+        .map(|addr| format_authority(&addr.ip().to_string(), port))
+        .collect())
+}
+
+fn sort_socket_addrs_prefer_ipv4(addrs: &mut [SocketAddr]) {
+    addrs.sort_by_key(|addr| if addr.is_ipv4() { 0_u8 } else { 1_u8 });
+}
+
+async fn send_http_connect<T>(stream: &mut T, target: &str) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let request = format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: Keep-Alive\r\nConnection: Keep-Alive\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("failed writing CONNECT request")?;
+    stream
+        .flush()
+        .await
+        .context("failed flushing CONNECT request")?;
+
+    let mut response = Vec::with_capacity(512);
+    let mut byte = [0_u8; 1];
+    while response.len() < 64 * 1024 {
+        let read = stream
+            .read(&mut byte)
+            .await
+            .context("failed reading CONNECT response")?;
+        if read == 0 {
+            break;
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    if response.len() >= 64 * 1024 {
+        return Err(anyhow!("CONNECT response header exceeds limit"));
+    }
+
+    let text = String::from_utf8_lossy(&response);
+    let status_line = text.lines().next().unwrap_or_default();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("invalid CONNECT response status line: {status_line}"))?;
+    if status_code / 100 != 2 {
+        return Err(anyhow!(
+            "upstream proxy CONNECT failed with status {status_code}"
+        ));
+    }
+
+    Ok(())
+}
+
+async fn send_socks5_connect<T>(stream: &mut T, target: &str) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .context("failed writing SOCKS5 greeting")?;
+    stream
+        .flush()
+        .await
+        .context("failed flushing SOCKS5 greeting")?;
+
+    let mut greeting_response = [0_u8; 2];
+    stream
+        .read_exact(&mut greeting_response)
+        .await
+        .context("failed reading SOCKS5 greeting response")?;
+    if greeting_response[0] != 0x05 {
+        return Err(anyhow!(
+            "invalid SOCKS5 greeting version {}",
+            greeting_response[0]
+        ));
+    }
+    if greeting_response[1] == 0xFF {
+        return Err(anyhow!(
+            "SOCKS5 proxy has no acceptable authentication method"
+        ));
+    }
+    if greeting_response[1] != 0x00 {
+        return Err(anyhow!(
+            "SOCKS5 proxy requires unsupported auth method {}",
+            greeting_response[1]
+        ));
+    }
+
+    let (host, port) = parse_target_host_port(target)?;
+    let mut request = vec![0x05, 0x01, 0x00];
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        request.push(0x01);
+        request.extend_from_slice(&ip.octets());
+    } else if let Ok(ip) = host.parse::<Ipv6Addr>() {
+        request.push(0x04);
+        request.extend_from_slice(&ip.octets());
+    } else {
+        if host.len() > 255 {
+            return Err(anyhow!(
+                "SOCKS5 target host is too long ({} bytes)",
+                host.len()
+            ));
+        }
+        request.push(0x03);
+        request.push(host.len() as u8);
+        request.extend_from_slice(host.as_bytes());
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+
+    stream
+        .write_all(&request)
+        .await
+        .context("failed writing SOCKS5 CONNECT request")?;
+    stream
+        .flush()
+        .await
+        .context("failed flushing SOCKS5 CONNECT request")?;
+
+    let mut response_head = [0_u8; 4];
+    stream
+        .read_exact(&mut response_head)
+        .await
+        .context("failed reading SOCKS5 CONNECT response header")?;
+    if response_head[0] != 0x05 {
+        return Err(anyhow!(
+            "invalid SOCKS5 response version {}",
+            response_head[0]
+        ));
+    }
+    if response_head[1] != 0x00 {
+        return Err(anyhow!(
+            "SOCKS5 proxy CONNECT failed with status {}",
+            response_head[1]
+        ));
+    }
+
+    let atyp = response_head[3];
+    match atyp {
+        0x01 => {
+            let mut addr = [0_u8; 4];
+            stream
+                .read_exact(&mut addr)
+                .await
+                .context("failed reading SOCKS5 IPv4 bind address")?;
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .context("failed reading SOCKS5 domain length")?;
+            let mut domain = vec![0_u8; usize::from(len[0])];
+            stream
+                .read_exact(&mut domain)
+                .await
+                .context("failed reading SOCKS5 domain bind address")?;
+        }
+        0x04 => {
+            let mut addr = [0_u8; 16];
+            stream
+                .read_exact(&mut addr)
+                .await
+                .context("failed reading SOCKS5 IPv6 bind address")?;
+        }
+        _ => return Err(anyhow!("SOCKS5 response has unknown address type {atyp}")),
+    }
+
+    let mut bind_port = [0_u8; 2];
+    stream
+        .read_exact(&mut bind_port)
+        .await
+        .context("failed reading SOCKS5 bind port")?;
+
+    Ok(())
+}
+
+async fn send_socks4_connect<T>(stream: &mut T, target: &str) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let (host, port) = parse_target_host_port(target)?;
+    let mut request = vec![0x04, 0x01];
+    request.extend_from_slice(&port.to_be_bytes());
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        request.extend_from_slice(&ip.octets());
+        request.push(0x00);
+    } else {
+        request.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        request.push(0x00);
+        request.extend_from_slice(host.as_bytes());
+        request.push(0x00);
+    }
+
+    stream
+        .write_all(&request)
+        .await
+        .context("failed writing SOCKS4 CONNECT request")?;
+    stream
+        .flush()
+        .await
+        .context("failed flushing SOCKS4 CONNECT request")?;
+
+    let mut response = [0_u8; 8];
+    stream
+        .read_exact(&mut response)
+        .await
+        .context("failed reading SOCKS4 CONNECT response")?;
+    if response[1] != 0x5A {
+        return Err(anyhow!(
+            "SOCKS4 proxy CONNECT failed with status {}",
+            response[1]
+        ));
+    }
+    Ok(())
+}
+
+fn parse_target_host_port(target: &str) -> Result<(String, u16)> {
+    let authority = target
+        .parse::<http::uri::Authority>()
+        .with_context(|| format!("invalid target authority '{target}'"))?;
+    let host = authority.host().to_string();
+    let port = authority
+        .port_u16()
+        .ok_or_else(|| anyhow!("target authority '{target}' missing explicit port"))?;
+    Ok((host, port))
+}
+
+fn format_authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn extract_host(parts: &http::request::Parts, authority_hint: Option<&str>) -> String {
     parts
         .uri
@@ -705,9 +1318,9 @@ fn request_target_for_blob(parts: &http::request::Parts) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
-fn content_encoding_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+fn content_encoding_from_headers(headers: &http::HeaderMap) -> Option<String> {
     headers
-        .get(reqwest::header::CONTENT_ENCODING)
+        .get(http::header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -819,6 +1432,18 @@ fn format_body_preview(bytes: &[u8], max_bytes: usize) -> String {
     out
 }
 
+fn format_error_chain(err: &anyhow::Error) -> String {
+    let mut parts = Vec::new();
+    for (idx, cause) in err.chain().enumerate() {
+        if idx == 0 {
+            parts.push(cause.to_string());
+        } else {
+            parts.push(format!("caused by[{idx}]: {cause}"));
+        }
+    }
+    parts.join(" | ")
+}
+
 async fn find_available_bind(start: SocketAddr) -> io::Result<SocketAddr> {
     let mut addr = start;
     loop {
@@ -857,8 +1482,17 @@ fn ensure_rustls_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-    use super::{decode_http_body_bytes, format_body_preview};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::{
+        decode_http_body_bytes, format_body_preview, select_upstream_chain_from_settings,
+        send_socks5_connect, sort_socket_addrs_prefer_ipv4,
+    };
+    use crate::{
+        UpstreamChainMode, UpstreamProxyEntry, UpstreamProxyProtocol, UpstreamProxySettings,
+    };
 
     #[test]
     fn body_preview_escapes_binary_and_control_chars() {
@@ -895,5 +1529,143 @@ mod tests {
         let compressed = zstd::stream::encode_all("decoded-zstd".as_bytes(), 1).expect("encode");
         let decoded = decode_http_body_bytes(&compressed, None).expect("decode");
         assert_eq!(decoded, b"decoded-zstd");
+    }
+
+    #[test]
+    fn strict_chain_selects_all_entries() {
+        let settings = UpstreamProxySettings {
+            proxies: vec![
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "1.1.1.1".to_string(),
+                    port: 8080,
+                },
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "2.2.2.2".to_string(),
+                    port: 8080,
+                },
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "3.3.3.3".to_string(),
+                    port: 8080,
+                },
+            ],
+            proxy_dns: false,
+            chain_mode: UpstreamChainMode::StrictChain,
+            min_chain_length: 2,
+            max_chain_length: 3,
+        };
+        let selected = select_upstream_chain_from_settings(&settings, 42);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].address, "1.1.1.1");
+        assert_eq!(selected[1].address, "2.2.2.2");
+        assert_eq!(selected[2].address, "3.3.3.3");
+    }
+
+    #[test]
+    fn random_chain_selects_requested_length() {
+        let settings = UpstreamProxySettings {
+            proxies: vec![
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "1.1.1.1".to_string(),
+                    port: 8080,
+                },
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "2.2.2.2".to_string(),
+                    port: 8080,
+                },
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: "3.3.3.3".to_string(),
+                    port: 8080,
+                },
+            ],
+            proxy_dns: false,
+            chain_mode: UpstreamChainMode::RandomChain,
+            min_chain_length: 2,
+            max_chain_length: 3,
+        };
+        let selected = select_upstream_chain_from_settings(&settings, 7);
+        assert!(selected.len() >= 2);
+        assert!(selected.len() <= 3);
+        assert!(
+            selected.iter().all(|entry| {
+                matches!(entry.address.as_str(), "1.1.1.1" | "2.2.2.2" | "3.3.3.3")
+            })
+        );
+    }
+
+    #[test]
+    fn sort_socket_addrs_prefers_ipv4() {
+        let mut addrs = vec![
+            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 8080, 0, 0)),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+        ];
+        sort_socket_addrs_prefer_ipv4(&mut addrs);
+        assert!(addrs[0].is_ipv4());
+        assert!(addrs[1].is_ipv6());
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_handshake_success() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind socks mock");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut greeting = [0_u8; 3];
+            socket
+                .read_exact(&mut greeting)
+                .await
+                .expect("read greeting");
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            socket
+                .write_all(&[0x05, 0x00])
+                .await
+                .expect("write greeting response");
+
+            let mut head = [0_u8; 4];
+            socket
+                .read_exact(&mut head)
+                .await
+                .expect("read request head");
+            assert_eq!(head[0], 0x05);
+            assert_eq!(head[1], 0x01);
+            assert_eq!(head[2], 0x00);
+            match head[3] {
+                0x03 => {
+                    let mut len = [0_u8; 1];
+                    socket.read_exact(&mut len).await.expect("read domain len");
+                    let mut domain = vec![0_u8; usize::from(len[0])];
+                    socket.read_exact(&mut domain).await.expect("read domain");
+                    assert_eq!(
+                        String::from_utf8(domain).expect("domain utf8"),
+                        "example.com"
+                    );
+                }
+                other => panic!("unexpected ATYP {other}"),
+            }
+            let mut port = [0_u8; 2];
+            socket.read_exact(&mut port).await.expect("read port");
+            assert_eq!(u16::from_be_bytes(port), 443);
+
+            socket
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1F, 0x90])
+                .await
+                .expect("write connect response");
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect socks mock");
+        send_socks5_connect(&mut client, "example.com:443")
+            .await
+            .expect("socks5 connect succeeds");
+        server.await.expect("server join");
     }
 }

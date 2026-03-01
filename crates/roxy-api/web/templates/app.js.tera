@@ -10,6 +10,7 @@ const appState = {
   selectedIntruderJob: null,
   proxyHistoryRows: [],
   proxyHistoryMode: 'both',
+  upstreamSettingsSaveTimer: null,
   toastTimer: null,
   settings: loadUiSettings(),
 };
@@ -727,6 +728,110 @@ async function loadProxyToggles() {
   }
 }
 
+function parseUpstreamProxyList(rawText) {
+  const out = [];
+  for (const line of (rawText || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+    const parts = trimmed.split(/\s+/);
+    if (parts.length !== 3) {
+      throw new Error(`Invalid upstream proxy entry '${trimmed}'. Expected: <protocol> <ip-address> <port>`);
+    }
+    const protocol = parts[0].toLowerCase();
+    const address = parts[1];
+    const port = Number(parts[2]);
+    if (!['http', 'https', 'socks4', 'socks5'].includes(protocol)) {
+      throw new Error(`Invalid protocol '${protocol}' in entry '${trimmed}'`);
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid port '${parts[2]}' in entry '${trimmed}'`);
+    }
+    out.push({ protocol, address, port });
+  }
+  return out;
+}
+
+function formatUpstreamProxyList(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return '';
+  }
+  return entries.map((entry) => `${entry.protocol} ${entry.address} ${entry.port}`).join('\n');
+}
+
+function syncUpstreamRandomFieldsVisibility() {
+  const mode = qs('setting-upstream-chain-mode').value || 'strict_chain';
+  const randomOptions = qs('setting-upstream-random-options');
+  if (!randomOptions) {
+    return;
+  }
+  randomOptions.hidden = mode !== 'random_chain';
+}
+
+async function loadUpstreamProxySettings() {
+  try {
+    const settings = await api('/proxy/settings/upstream');
+    qs('setting-upstream-proxy-list').value = formatUpstreamProxyList(settings.proxies);
+    qs('setting-upstream-proxy-dns').checked = Boolean(settings.proxy_dns);
+    qs('setting-upstream-chain-mode').value = settings.chain_mode || 'strict_chain';
+    qs('setting-upstream-min-chain-length').value = String(
+      Math.max(1, Number(settings.min_chain_length || 1)),
+    );
+    qs('setting-upstream-max-chain-length').value = String(
+      Math.max(1, Number(settings.max_chain_length || 1)),
+    );
+    syncUpstreamRandomFieldsVisibility();
+    qs('setting-upstream-status').textContent = 'Loaded upstream proxy chain settings.';
+  } catch (err) {
+    qs('setting-upstream-status').textContent = `Failed to load upstream settings: ${err.message}`;
+    toast(`Upstream settings load failed: ${err.message}`);
+  }
+}
+
+async function saveUpstreamProxySettings() {
+  const minChainLength = Math.max(1, Number(qs('setting-upstream-min-chain-length').value || 1));
+  const maxChainLength = Math.max(
+    minChainLength,
+    Number(qs('setting-upstream-max-chain-length').value || 1),
+  );
+  const payload = {
+    proxies: parseUpstreamProxyList(qs('setting-upstream-proxy-list').value),
+    proxy_dns: qs('setting-upstream-proxy-dns').checked,
+    chain_mode: qs('setting-upstream-chain-mode').value || 'strict_chain',
+    min_chain_length: minChainLength,
+    max_chain_length: maxChainLength,
+  };
+  const saved = await api('/proxy/settings/upstream', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+  qs('setting-upstream-proxy-list').value = formatUpstreamProxyList(saved.proxies);
+  qs('setting-upstream-proxy-dns').checked = Boolean(saved.proxy_dns);
+  qs('setting-upstream-chain-mode').value = saved.chain_mode || 'strict_chain';
+  qs('setting-upstream-min-chain-length').value = String(
+    Math.max(1, Number(saved.min_chain_length || 1)),
+  );
+  qs('setting-upstream-max-chain-length').value = String(
+    Math.max(1, Number(saved.max_chain_length || 1)),
+  );
+  syncUpstreamRandomFieldsVisibility();
+  qs('setting-upstream-status').textContent = 'Upstream proxy settings saved.';
+}
+
+function scheduleUpstreamProxySettingsSave() {
+  clearTimeout(appState.upstreamSettingsSaveTimer);
+  qs('setting-upstream-status').textContent = 'Saving upstream proxy settings...';
+  appState.upstreamSettingsSaveTimer = setTimeout(async () => {
+    try {
+      await saveUpstreamProxySettings();
+    } catch (err) {
+      qs('setting-upstream-status').textContent = `Failed to save upstream settings: ${err.message}`;
+      toast(`Upstream settings save failed: ${err.message}`);
+    }
+  }, 250);
+}
+
 function fillRequestForm(request) {
   qs('request-blob').value = requestBlobText(request);
 }
@@ -895,17 +1000,22 @@ async function initializeModules() {
 
 async function saveUiSettings(event) {
   event.preventDefault();
-  appState.settings.theme_preference = qs('theme-preference').value || 'auto';
-  for (const moduleId of moduleRegistry.keys()) {
-    await invokeModuleHook(moduleId, 'onSettingsSave');
+  try {
+    appState.settings.theme_preference = qs('theme-preference').value || 'auto';
+    await saveUpstreamProxySettings();
+    for (const moduleId of moduleRegistry.keys()) {
+      await invokeModuleHook(moduleId, 'onSettingsSave');
+    }
+    persistUiSettings();
+    applyThemePreference();
+    clearModuleIntervals();
+    for (const moduleId of moduleRegistry.keys()) {
+      scheduleModuleRefresh(moduleId);
+    }
+    toast('Settings saved');
+  } catch (err) {
+    toast(`Save settings failed: ${err.message}`);
   }
-  persistUiSettings();
-  applyThemePreference();
-  clearModuleIntervals();
-  for (const moduleId of moduleRegistry.keys()) {
-    scheduleModuleRefresh(moduleId);
-  }
-  toast('Settings saved');
 }
 
 function bindEvents() {
@@ -1007,6 +1117,15 @@ function bindEvents() {
     }
   });
 
+  qs('setting-upstream-chain-mode').addEventListener('change', () => {
+    syncUpstreamRandomFieldsVisibility();
+    scheduleUpstreamProxySettingsSave();
+  });
+  qs('setting-upstream-proxy-list').addEventListener('change', scheduleUpstreamProxySettingsSave);
+  qs('setting-upstream-proxy-dns').addEventListener('change', scheduleUpstreamProxySettingsSave);
+  qs('setting-upstream-min-chain-length').addEventListener('change', scheduleUpstreamProxySettingsSave);
+  qs('setting-upstream-max-chain-length').addEventListener('change', scheduleUpstreamProxySettingsSave);
+
   document.addEventListener('click', (event) => {
     const menu = qs('plugins-tab-menu');
     const anchor = pluginTabButton();
@@ -1041,6 +1160,7 @@ async function init() {
   window.__roxySelectedPlugin = selectedPluginFromStorage();
   setProxyHistoryMode('both');
   bindEvents();
+  syncUpstreamRandomFieldsVisibility();
   applyThemePreference();
 
   await Promise.all([
@@ -1049,6 +1169,7 @@ async function init() {
     loadSiteMap(),
     loadHistory(''),
     loadProxyToggles(),
+    loadUpstreamProxySettings(),
     loadInterceptQueues(),
     loadProxyHistory(),
   ]);

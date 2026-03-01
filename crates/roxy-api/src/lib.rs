@@ -14,7 +14,7 @@ use bytes::Bytes;
 use ntex::web::{self, HttpResponse};
 use roxy_core::{
     AppState, CertManager, InterceptDecision, IntruderJobSpec, IntruderManager, RequestMutation,
-    ResponseInterceptDecision, ResponseMutation,
+    ResponseInterceptDecision, ResponseMutation, UpstreamProxySettings,
     model::{HeaderValuePair, now_unix_ms},
     parse_request_blob,
 };
@@ -288,6 +288,14 @@ pub async fn run_api_with_shutdown_and_ready(
                             )
                             .route("/proxy/settings/ca.der", web::get().to(download_ca_der))
                             .route(
+                                "/proxy/settings/upstream",
+                                web::get().to(get_upstream_proxy_settings),
+                            )
+                            .route(
+                                "/proxy/settings/upstream",
+                                web::put().to(set_upstream_proxy_settings),
+                            )
+                            .route(
                                 "/proxy/settings/ca/regenerate",
                                 web::post().to(regenerate_ca),
                             )
@@ -398,6 +406,14 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                             web::post().to(continue_response_intercept),
                         )
                         .route("/proxy/settings/ca.der", web::get().to(download_ca_der))
+                        .route(
+                            "/proxy/settings/upstream",
+                            web::get().to(get_upstream_proxy_settings),
+                        )
+                        .route(
+                            "/proxy/settings/upstream",
+                            web::put().to(set_upstream_proxy_settings),
+                        )
                         .route(
                             "/proxy/settings/ca/regenerate",
                             web::post().to(regenerate_ca),
@@ -618,6 +634,29 @@ async fn download_ca_der(state: web::types::State<ApiState>) -> HttpResponse {
         .content_type("application/x-x509-ca-cert")
         .set_header("content-disposition", "attachment; filename=roxy-ca.der")
         .body(der)
+}
+
+async fn get_upstream_proxy_settings(state: web::types::State<ApiState>) -> HttpResponse {
+    HttpResponse::Ok().json(&state.app_state.upstream_proxy_settings())
+}
+
+async fn set_upstream_proxy_settings(
+    state: web::types::State<ApiState>,
+    req: web::types::Json<UpstreamProxySettings>,
+) -> HttpResponse {
+    state
+        .app_state
+        .set_upstream_proxy_settings(req.into_inner());
+    let saved = state.app_state.upstream_proxy_settings();
+    info!(
+        proxies = saved.proxies.len(),
+        proxy_dns = saved.proxy_dns,
+        chain_mode = ?saved.chain_mode,
+        min_chain_length = saved.min_chain_length,
+        max_chain_length = saved.max_chain_length,
+        "updated upstream proxy settings"
+    );
+    HttpResponse::Ok().json(&saved)
 }
 
 async fn regenerate_ca(state: web::types::State<ApiState>) -> HttpResponse {

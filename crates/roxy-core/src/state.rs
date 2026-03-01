@@ -1,9 +1,10 @@
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
 use dashmap::{DashMap, DashSet};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -22,6 +23,70 @@ pub enum ResponseInterceptDecision {
     Forward,
     Mutate(ResponseMutation),
     Drop,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamProxyProtocol {
+    Http,
+    Https,
+    Socks4,
+    Socks5,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpstreamProxyEntry {
+    pub protocol: UpstreamProxyProtocol,
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamChainMode {
+    StrictChain,
+    RandomChain,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UpstreamProxySettings {
+    pub proxies: Vec<UpstreamProxyEntry>,
+    pub proxy_dns: bool,
+    pub chain_mode: UpstreamChainMode,
+    pub min_chain_length: usize,
+    pub max_chain_length: usize,
+}
+
+impl Default for UpstreamProxySettings {
+    fn default() -> Self {
+        Self {
+            proxies: Vec::new(),
+            proxy_dns: false,
+            chain_mode: UpstreamChainMode::StrictChain,
+            min_chain_length: 1,
+            max_chain_length: 1,
+        }
+    }
+}
+
+impl UpstreamProxySettings {
+    pub fn normalized(mut self) -> Self {
+        self.proxies = self
+            .proxies
+            .into_iter()
+            .filter_map(|mut proxy| {
+                proxy.address = proxy.address.trim().to_string();
+                if proxy.address.is_empty() || proxy.port == 0 {
+                    return None;
+                }
+                Some(proxy)
+            })
+            .collect();
+        self.min_chain_length = self.min_chain_length.max(1);
+        self.max_chain_length = self.max_chain_length.max(1).max(self.min_chain_length);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -107,6 +172,7 @@ pub struct AppState {
     pending_response_intercepts: DashMap<Uuid, Arc<PendingResponseIntercept>>,
     site_map: DashMap<String, DashSet<String>>,
     scope_hosts: DashSet<String>,
+    upstream_proxy_settings: RwLock<UpstreamProxySettings>,
 }
 
 impl Default for AppState {
@@ -125,6 +191,7 @@ impl AppState {
             pending_response_intercepts: DashMap::new(),
             site_map: DashMap::new(),
             scope_hosts: DashSet::new(),
+            upstream_proxy_settings: RwLock::new(UpstreamProxySettings::default()),
         }
     }
 
@@ -281,6 +348,19 @@ impl AppState {
         hosts
     }
 
+    pub fn upstream_proxy_settings(&self) -> UpstreamProxySettings {
+        self.upstream_proxy_settings
+            .read()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_upstream_proxy_settings(&self, settings: UpstreamProxySettings) {
+        if let Ok(mut value) = self.upstream_proxy_settings.write() {
+            *value = settings.normalized();
+        }
+    }
+
     fn host_in_scope(&self, host: &str) -> bool {
         if self.scope_hosts.is_empty() {
             return true;
@@ -434,5 +514,36 @@ mod tests {
         );
         assert!(state.remove_scope_host("example.com"));
         assert_eq!(state.scope_hosts(), vec!["*.foo.org".to_string()]);
+    }
+
+    #[test]
+    fn upstream_proxy_settings_round_trip_and_normalize() {
+        let state = AppState::new();
+        state.set_upstream_proxy_settings(UpstreamProxySettings {
+            proxies: vec![
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Http,
+                    address: " 127.0.0.1 ".to_string(),
+                    port: 8080,
+                },
+                UpstreamProxyEntry {
+                    protocol: UpstreamProxyProtocol::Socks5,
+                    address: " ".to_string(),
+                    port: 1080,
+                },
+            ],
+            proxy_dns: true,
+            chain_mode: UpstreamChainMode::RandomChain,
+            min_chain_length: 0,
+            max_chain_length: 0,
+        });
+
+        let value = state.upstream_proxy_settings();
+        assert_eq!(value.proxies.len(), 1);
+        assert_eq!(value.proxies[0].address, "127.0.0.1");
+        assert!(value.proxy_dns);
+        assert_eq!(value.chain_mode, UpstreamChainMode::RandomChain);
+        assert_eq!(value.min_chain_length, 1);
+        assert_eq!(value.max_chain_length, 1);
     }
 }

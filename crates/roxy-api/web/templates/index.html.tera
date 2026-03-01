@@ -224,6 +224,26 @@
                     After regenerating CA, re-import the cert in your local trust store and restart apps using the proxy.
                   </p>
                 </article>
+                <article class="card">
+                  <h3>Upstream Proxy Chain</h3>
+                  <div class="stack">
+                    <label for="setting-upstream-proxy-list">Proxy list (`&lt;protocol&gt; &lt;ip-address&gt; &lt;port&gt;`, one per line)</label>
+                    <textarea id="setting-upstream-proxy-list" rows="6" spellcheck="false" placeholder="http 127.0.0.1 9050"></textarea>
+                    <label><input type="checkbox" id="setting-upstream-proxy-dns" /> Proxy DNS</label>
+                    <label for="setting-upstream-chain-mode">Chain mode</label>
+                    <select id="setting-upstream-chain-mode">
+                      <option value="strict_chain">strict chain</option>
+                      <option value="random_chain">random chain</option>
+                    </select>
+                    <div id="setting-upstream-random-options" class="stack" hidden>
+                      <label for="setting-upstream-min-chain-length">Min chain length</label>
+                      <input id="setting-upstream-min-chain-length" type="number" min="1" step="1" value="1" />
+                      <label for="setting-upstream-max-chain-length">Max chain length</label>
+                      <input id="setting-upstream-max-chain-length" type="number" min="1" step="1" value="1" />
+                    </div>
+                  </div>
+                  <p id="setting-upstream-status" class="hint">Configured through API settings and applied immediately.</p>
+                </article>
               </div>
             </details>
 

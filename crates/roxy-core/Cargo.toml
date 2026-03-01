@@ -32,6 +32,7 @@ reqwest.workspace = true
 brotli.workspace = true
 flate2.workspace = true
 zstd.workspace = true
+webpki-roots.workspace = true
 boring = { version = "4", optional = true }
 
 [dev-dependencies]
