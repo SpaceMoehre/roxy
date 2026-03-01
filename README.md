@@ -197,7 +197,7 @@ Included:
 Workflow file: `.github/workflows/ci-release.yml`
 
 - On `push` / `pull_request`: runs format check and full test suite.
-- On tag push `v*` (example: `v0.2.0`):
+- On any tag push (example: `v0.2.0`) or GitHub Release publish:
   - builds `roxy` release executable and uploads assets to GitHub Release
   - builds and pushes Docker image to Docker Hub
 
