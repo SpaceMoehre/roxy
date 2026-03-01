@@ -269,9 +269,7 @@ fn query_requires_literal_fallback(query: &str) -> bool {
 }
 
 fn quote_for_phrase_query(query: &str) -> String {
-    let escaped = query
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
@@ -467,7 +465,9 @@ mod tests {
             .await
             .expect("persist exchange");
 
-        let request_hits = manager.search("req-blob-42", 10).expect("request blob search");
+        let request_hits = manager
+            .search("req-blob-42", 10)
+            .expect("request blob search");
         assert_eq!(request_hits.len(), 1);
         assert_eq!(request_hits[0].id, id);
 
