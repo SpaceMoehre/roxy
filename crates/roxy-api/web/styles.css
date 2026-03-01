@@ -677,6 +677,13 @@ button.warn {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
 }
 
+.history-hit {
+  background: #ffe169;
+  color: #2c2200;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
 .proxy-history-pane h4 {
   margin: 0 0 4px;
   font-size: 12px;

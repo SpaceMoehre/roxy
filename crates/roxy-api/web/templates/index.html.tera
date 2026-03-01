@@ -60,7 +60,27 @@
                 <input id="history-q" placeholder="method, path, body token..." />
                 <button type="submit">Search</button>
               </form>
-              <div id="history-results" class="scroll-list"></div>
+              <div class="proxy-history-layout">
+                <div class="proxy-history-upper">
+                  <div id="history-results" class="scroll-list"></div>
+                </div>
+                <div class="proxy-history-lower">
+                  <div class="proxy-history-toolbar">
+                    <div id="history-detail-meta" class="status">No search result selected</div>
+                  </div>
+                  <div id="history-detail-empty" class="scroll-item">Select a search result above.</div>
+                  <div id="history-detail-grid" class="proxy-history-detail-grid" style="display:none;">
+                    <div class="proxy-history-pane">
+                      <h4>Request</h4>
+                      <pre id="history-detail-request" class="output"></pre>
+                    </div>
+                    <div class="proxy-history-pane">
+                      <h4>Response</h4>
+                      <pre id="history-detail-response" class="output"></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </article>
           </div>
         </section>

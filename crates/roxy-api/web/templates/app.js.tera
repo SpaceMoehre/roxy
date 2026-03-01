@@ -7,7 +7,10 @@ const appState = {
   selectedRequest: null,
   selectedResponse: null,
   selectedProxyHistoryId: null,
+  selectedHistorySearchId: null,
+  historySearchQuery: '',
   selectedIntruderJob: null,
+  historySearchRows: [],
   proxyHistoryRows: [],
   proxyHistoryMode: 'both',
   upstreamSettingsSaveTimer: null,
@@ -29,6 +32,73 @@ window.RoxyModuleHost = {
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizedHistoryHighlightTerms() {
+  const query = (appState.historySearchQuery || '').trim();
+  if (!query) {
+    return [];
+  }
+
+  const terms = query
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0)
+    .slice(0, 20);
+
+  const unique = [];
+  const seen = new Set();
+  for (const term of terms) {
+    const key = term.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(term);
+  }
+
+  unique.sort((a, b) => b.length - a.length);
+  return unique;
+}
+
+function highlightTextForHistory(text, terms) {
+  const source = String(text || '');
+  if (!terms.length) {
+    return escapeHtml(source);
+  }
+
+  const pattern = terms.map((term) => escapeRegex(term)).join('|');
+  if (!pattern) {
+    return escapeHtml(source);
+  }
+
+  const regex = new RegExp(pattern, 'gi');
+  let cursor = 0;
+  let out = '';
+  let match = regex.exec(source);
+  while (match) {
+    const index = match.index;
+    const value = match[0];
+    out += escapeHtml(source.slice(cursor, index));
+    out += `<mark class="history-hit">${escapeHtml(value)}</mark>`;
+    cursor = index + value.length;
+    match = regex.exec(source);
+  }
+  out += escapeHtml(source.slice(cursor));
+  return out;
 }
 
 function moduleContext(moduleId) {
@@ -837,6 +907,41 @@ function renderProxyHistoryDetail() {
   respWrap.style.display = mode === 'request' ? 'none' : 'block';
 }
 
+function selectedHistorySearchRow() {
+  return appState.historySearchRows.find((row) => row.id === appState.selectedHistorySearchId) || null;
+}
+
+function renderHistorySearchDetail() {
+  const empty = qs('history-detail-empty');
+  const grid = qs('history-detail-grid');
+  const reqOut = qs('history-detail-request');
+  const respOut = qs('history-detail-response');
+  const meta = qs('history-detail-meta');
+  const row = selectedHistorySearchRow();
+
+  if (!empty || !grid || !reqOut || !respOut || !meta) {
+    return;
+  }
+
+  if (!row) {
+    empty.style.display = 'block';
+    grid.style.display = 'none';
+    meta.textContent = 'No search result selected';
+    reqOut.textContent = '';
+    respOut.textContent = '';
+    return;
+  }
+
+  const req = row.exchange.request;
+  const resp = row.exchange.response;
+  const terms = normalizedHistoryHighlightTerms();
+  empty.style.display = 'none';
+  grid.style.display = 'grid';
+  meta.textContent = `${req.method} ${req.uri} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms`;
+  reqOut.innerHTML = highlightTextForHistory(requestBlobText(req), terms);
+  respOut.innerHTML = highlightTextForHistory(responseBlobText(resp), terms);
+}
+
 function renderHistoryRows(root, rows, emptyText) {
   root.innerHTML = '';
 
@@ -850,13 +955,19 @@ function renderHistoryRows(root, rows, emptyText) {
     const resp = row.exchange.response;
     const item = document.createElement('div');
     item.className = 'scroll-item';
+    if (row.id === appState.selectedHistorySearchId) {
+      item.classList.add('active');
+    }
     item.innerHTML = `
       <strong>${req.method}</strong> ${req.uri}<br>
       <small>${req.host} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms</small>
     `;
     item.addEventListener('click', () => {
-      sendRequestToRepeater(req);
+      appState.selectedHistorySearchId = row.id;
+      renderHistoryRows(root, rows, emptyText);
+      renderHistorySearchDetail();
     });
+    item.addEventListener('dblclick', () => sendRequestToRepeater(req));
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       void openRequestContextMenu(event, req);
@@ -950,10 +1061,19 @@ async function loadScope() {
 
 async function loadHistory(query = '') {
   try {
+    appState.historySearchQuery = query;
     const q = encodeURIComponent(query);
     const rows = await api(`/history/search?q=${q}&limit=100`);
+    appState.historySearchRows = Array.isArray(rows) ? rows : [];
+    if (
+      appState.selectedHistorySearchId
+      && !appState.historySearchRows.some((row) => row.id === appState.selectedHistorySearchId)
+    ) {
+      appState.selectedHistorySearchId = null;
+    }
     const root = qs('history-results');
-    renderHistoryRows(root, rows, 'No matches.');
+    renderHistoryRows(root, appState.historySearchRows, 'No matches.');
+    renderHistorySearchDetail();
   } catch (err) {
     toast(`History search failed: ${err.message}`);
   }

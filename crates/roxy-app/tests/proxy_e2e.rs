@@ -608,6 +608,38 @@ async fn plugin_middleware_substitutes_request_and_response_blobs() {
     let _ = upstream_task.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local socket permissions in test environment"]
+async fn single_port_history_search_query_with_colon_is_accepted() {
+    let ingress_port = reserve_port();
+    let data_dir = TempDir::new().expect("temp dir");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roxy"));
+    child
+        .env("ROXY_BIND", format!("127.0.0.1:{ingress_port}"))
+        .env("ROXY_DATA_DIR", data_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = child.spawn().expect("failed to spawn roxy");
+    let _child_guard = ChildGuard::new(child);
+
+    let api_base = format!("http://127.0.0.1:{ingress_port}/api/v1");
+    let api_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("api client");
+    wait_for_health(&api_client, &api_base, Duration::from_secs(15)).await;
+
+    let response = api_client
+        .get(format!("{api_base}/history/search?q=a:b&limit=100"))
+        .send()
+        .await
+        .expect("history search request");
+
+    assert_eq!(response.status().as_u16(), 200);
+}
+
 fn reserve_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind local ephemeral port");
     let port = listener.local_addr().expect("local addr").port();

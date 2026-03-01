@@ -103,11 +103,12 @@ impl StorageManager {
             .insert(key, payload)
             .context("failed writing exchange to sled")?;
 
-        let req_body = String::from_utf8_lossy(&exchange.request.body).to_string();
-        let resp_body = exchange
+        // Index the complete request/response blobs so search covers the full payloads.
+        let request_blob = String::from_utf8_lossy(exchange.request.raw.as_ref()).to_string();
+        let response_blob = exchange
             .response
             .as_ref()
-            .map(|r| String::from_utf8_lossy(&r.body).to_string())
+            .map(build_response_blob_text)
             .unwrap_or_default();
 
         let mut writer = self.inner.index_writer.lock().await;
@@ -116,8 +117,8 @@ impl StorageManager {
             self.inner.fields.method => exchange.request.method.clone(),
             self.inner.fields.host => exchange.request.host.clone(),
             self.inner.fields.uri => exchange.request.uri.clone(),
-            self.inner.fields.request_body => req_body,
-            self.inner.fields.response_body => resp_body,
+            self.inner.fields.request_body => request_blob,
+            self.inner.fields.response_body => response_blob,
         ))?;
         writer.commit().context("tantivy commit failed")?;
         self.inner
@@ -163,7 +164,9 @@ impl StorageManager {
                 self.inner.fields.response_body,
             ],
         );
-        let query = parser.parse_query(query).context("invalid search query")?;
+        // Use lenient parsing for user-entered history queries so parser syntax
+        // characters (for example `:` in `a:b`) do not hard-fail with 400.
+        let (query, _parse_errors) = parser.parse_query_lenient(query);
         let docs = searcher
             .search(&query, &TopDocs::with_limit(limit))
             .context("tantivy search failed")?;
@@ -216,6 +219,19 @@ impl StorageManager {
         rows.truncate(limit);
         Ok(rows)
     }
+}
+
+fn build_response_blob_text(response: &roxy_core::model::CapturedResponse) -> String {
+    let mut blob = format!("HTTP/1.1 {}\r\n", response.status);
+    for header in &response.headers {
+        blob.push_str(&header.name);
+        blob.push_str(": ");
+        blob.push_str(&header.value);
+        blob.push_str("\r\n");
+    }
+    blob.push_str("\r\n");
+    blob.push_str(&String::from_utf8_lossy(response.body.as_ref()));
+    blob
 }
 
 fn open_or_create_index(path: &Path) -> Result<(Index, SearchFields)> {
@@ -327,5 +343,81 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].exchange.request.created_at_unix_ms, 2);
         assert_eq!(rows[1].exchange.request.created_at_unix_ms, 1);
+    }
+
+    #[tokio::test]
+    async fn search_allows_colon_in_literal_query() {
+        let tmp = TempDir::new().expect("tmp");
+        let manager = StorageManager::open(tmp.path()).expect("storage");
+        let exchange = fake_exchange();
+
+        manager
+            .persist_exchange(&exchange)
+            .await
+            .expect("persist exchange");
+
+        let hits = manager.search("a:b", 10).expect("search should not fail");
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_indexes_full_request_and_response_blobs() {
+        let tmp = TempDir::new().expect("tmp");
+        let manager = StorageManager::open(tmp.path()).expect("storage");
+        let id = Uuid::new_v4();
+        let exchange = CapturedExchange {
+            request: CapturedRequest {
+                id,
+                created_at_unix_ms: now_unix_ms(),
+                method: "GET".to_string(),
+                uri: "http://example.com/blob".to_string(),
+                host: "example.com".to_string(),
+                headers: vec![HeaderValuePair {
+                    name: "x-request-token".to_string(),
+                    value: "req-blob-42".to_string(),
+                }],
+                body: Bytes::from_static(b"request-body-data"),
+                raw: Bytes::from_static(
+                    b"GET http://example.com/blob HTTP/1.1\r\nhost: example.com\r\nx-request-token: req-blob-42\r\n\r\nrequest-body-data",
+                ),
+            },
+            response: Some(CapturedResponse {
+                request_id: id,
+                created_at_unix_ms: now_unix_ms(),
+                status: 418,
+                headers: vec![HeaderValuePair {
+                    name: "x-response-token".to_string(),
+                    value: "resp-blob-84".to_string(),
+                }],
+                body: Bytes::from_static(b"response-body-data"),
+            }),
+            duration_ms: 7,
+            error: None,
+        };
+
+        manager
+            .persist_exchange(&exchange)
+            .await
+            .expect("persist exchange");
+
+        let request_hits = manager.search("req-blob-42", 10).expect("request blob search");
+        assert_eq!(request_hits.len(), 1);
+        assert_eq!(request_hits[0].id, id);
+
+        let response_header_hits = manager
+            .search("resp-blob-84", 10)
+            .expect("response header blob search");
+        assert_eq!(response_header_hits.len(), 1);
+        assert_eq!(response_header_hits[0].id, id);
+
+        let response_status_hits = manager.search("418", 10).expect("response status search");
+        assert_eq!(response_status_hits.len(), 1);
+        assert_eq!(response_status_hits[0].id, id);
+
+        let response_body_hits = manager
+            .search("response-body-data", 10)
+            .expect("response body blob search");
+        assert_eq!(response_body_hits.len(), 1);
+        assert_eq!(response_body_hits[0].id, id);
     }
 }
