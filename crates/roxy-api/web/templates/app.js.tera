@@ -12,6 +12,7 @@ const appState = {
   selectedIntruderJob: null,
   historySearchRows: [],
   proxyHistoryRows: [],
+  pendingRequestRows: [],
   proxyHistoryMode: 'both',
   upstreamSettingsSaveTimer: null,
   ws: null,
@@ -532,6 +533,45 @@ function responseBlobText(response) {
   return `${head}\r\n${headerBlock}\r\n${body}`;
 }
 
+function parseRequestFromBlob(blobText, fallback = {}) {
+  const raw = String(blobText || '');
+  const separator = raw.search(/\r?\n\r?\n/);
+  const head = separator >= 0 ? raw.slice(0, separator) : raw;
+  const body = separator >= 0 ? raw.slice(separator).replace(/^\r?\n\r?\n/, '') : '';
+  const headLines = head.split(/\r?\n/).filter((line) => line.length > 0);
+
+  const requestLine = headLines.shift() || '';
+  const parts = requestLine.trim().split(/\s+/, 3);
+  const method = String(parts[0] || fallback.method || 'GET').toUpperCase();
+  const target = String(parts[1] || fallback.uri || '/');
+
+  const headers = [];
+  for (const line of headLines) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) {
+      continue;
+    }
+    headers.push({
+      name: line.slice(0, idx).trim(),
+      value: line.slice(idx + 1).trim(),
+    });
+  }
+
+  const hostHeader = headers.find((h) => h.name.toLowerCase() === 'host')?.value || '';
+  const host = String(fallback.host || hostHeader || '').trim();
+  const uri = target || fallback.uri || '/';
+
+  return {
+    id: fallback.id || '',
+    method,
+    uri,
+    host,
+    headers,
+    body: body ? encodeBody(body) : '',
+    raw: raw || requestBlobFromLegacy({ method, uri, host, headers, body: '' }),
+  };
+}
+
 function shellQuote(value) {
   const text = String(value ?? '');
   return `'${text.replace(/'/g, `'\"'\"'`)}'`;
@@ -590,6 +630,14 @@ function requestPluginPayload(request) {
     },
     source: 'proxy_history_context',
   };
+}
+
+function selectedInterceptResponseRequest() {
+  const response = appState.selectedResponse;
+  if (!response?.request_id) {
+    return null;
+  }
+  return appState.pendingRequestRows.find((row) => row.id === response.request_id) || null;
 }
 
 function requestToCurl(request) {
@@ -978,7 +1026,7 @@ function renderHistoryRows(root, rows, emptyText) {
   }
 }
 
-function renderList(rootId, items, mapper, onClick, activeKey) {
+function renderList(rootId, items, mapper, onClick, activeKey, onContextMenu = null) {
   const root = qs(rootId);
   root.innerHTML = '';
   if (!items.length) {
@@ -995,6 +1043,16 @@ function renderList(rootId, items, mapper, onClick, activeKey) {
     const key = item.id || item.request_id || item.snapshot?.id;
     if (key && key === activeKey) li.classList.add('active');
     li.addEventListener('click', () => onClick(item));
+    if (typeof onContextMenu === 'function') {
+      li.addEventListener('contextmenu', (event) => {
+        const request = onContextMenu(item);
+        if (!request) {
+          return;
+        }
+        event.preventDefault();
+        void openRequestContextMenu(event, request);
+      });
+    }
     root.appendChild(li);
   }
 }
@@ -1239,6 +1297,7 @@ function fillResponseForm(response) {
 }
 
 function renderInterceptQueues(requests, responses) {
+  appState.pendingRequestRows = Array.isArray(requests) ? requests : [];
   const selectedRequestId = appState.selectedRequest?.id;
   const selectedResponseId = appState.selectedResponse?.request_id;
 
@@ -1272,6 +1331,7 @@ function renderInterceptQueues(requests, responses) {
       loadInterceptQueues();
     },
     nextSelectedRequest?.id,
+    (item) => item,
   );
 
   renderList(
@@ -1284,6 +1344,7 @@ function renderInterceptQueues(requests, responses) {
       loadInterceptQueues();
     },
     nextSelectedResponse?.request_id,
+    (item) => requests.find((req) => req.id === item.request_id) || null,
   );
 }
 
@@ -1657,6 +1718,35 @@ function bindEvents() {
     e.preventDefault();
     loadHistory(qs('history-q').value.trim());
   });
+
+  const bindRequestContextTarget = (id, requestFactory) => {
+    const element = qs(id);
+    if (!element) {
+      return;
+    }
+    element.addEventListener('contextmenu', (event) => {
+      const request = requestFactory();
+      if (!request) {
+        return;
+      }
+      event.preventDefault();
+      void openRequestContextMenu(event, request);
+    });
+  };
+
+  bindRequestContextTarget('proxy-history-request', () => selectedProxyHistoryRow()?.exchange?.request || null);
+  bindRequestContextTarget('proxy-history-response', () => selectedProxyHistoryRow()?.exchange?.request || null);
+  bindRequestContextTarget('history-detail-request', () => selectedHistorySearchRow()?.exchange?.request || null);
+  bindRequestContextTarget('history-detail-response', () => selectedHistorySearchRow()?.exchange?.request || null);
+  bindRequestContextTarget('request-blob', () => parseRequestFromBlob(qs('request-blob')?.value || '', appState.selectedRequest || {}));
+  bindRequestContextTarget('response-status', () => selectedInterceptResponseRequest());
+  bindRequestContextTarget('response-headers', () => selectedInterceptResponseRequest());
+  bindRequestContextTarget('response-body', () => selectedInterceptResponseRequest());
+  bindRequestContextTarget('repeater-request', () => parseRequestFromBlob(qs('repeater-request')?.value || ''));
+  bindRequestContextTarget('repeater-output', () => parseRequestFromBlob(qs('repeater-request')?.value || ''));
+  bindRequestContextTarget('intruder-request-template', () => parseRequestFromBlob(qs('intruder-request-template')?.value || ''));
+  bindRequestContextTarget('intruder-result-request', () => parseRequestFromBlob(qs('intruder-result-request')?.textContent || ''));
+  bindRequestContextTarget('intruder-result-response', () => parseRequestFromBlob(qs('intruder-result-request')?.textContent || ''));
 
   qs('scope-form').addEventListener('submit', async (e) => {
     e.preventDefault();

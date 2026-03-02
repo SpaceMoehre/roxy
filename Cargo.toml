@@ -46,3 +46,12 @@ url = "2.5"
 zstd = "0.13"
 boring = "4.21"
 roxy-tls = { path = "crates/roxy-tls" }
+
+# Enable more optimization in the release profile at the cost of compile time.
+[profile.release]
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
