@@ -9,12 +9,13 @@ use std::{
     io::Read,
     net::SocketAddr,
     net::{Ipv4Addr, Ipv6Addr},
-    sync::Arc,
-    time::Instant,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
+use dashmap::DashMap;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode,
@@ -62,6 +63,15 @@ pub struct ProxyEngine {
     cert_manager: Arc<CertManager>,
     event_tx: mpsc::Sender<EventEnvelope>,
     middleware: Option<Arc<dyn ProxyMiddleware>>,
+}
+
+const AUTHORITY_RESOLVE_CACHE_TTL: Duration = Duration::from_secs(30);
+const DIRECT_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone)]
+struct AuthorityResolveCacheEntry {
+    expires_at: Instant,
+    targets: Vec<String>,
 }
 
 impl ProxyEngine {
@@ -895,9 +905,7 @@ async fn dial_via_upstream_chain(
     proxy_dns: bool,
 ) -> Result<TcpStream> {
     if chain.is_empty() {
-        return TcpStream::connect(authority)
-            .await
-            .with_context(|| format!("failed connecting to upstream authority {authority}"));
+        return connect_direct_authority(authority).await;
     }
 
     let final_targets = if proxy_dns {
@@ -1112,7 +1120,45 @@ fn xorshift64(mut x: u64) -> u64 {
     x
 }
 
+fn authority_resolution_cache() -> &'static DashMap<String, AuthorityResolveCacheEntry> {
+    static CACHE: OnceLock<DashMap<String, AuthorityResolveCacheEntry>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
+
+async fn connect_direct_authority(authority: &str) -> Result<TcpStream> {
+    let targets = resolve_authority_candidates(authority).await?;
+    let mut last_err: Option<anyhow::Error> = None;
+    for target in targets {
+        match tokio::time::timeout(DIRECT_CONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(&target))
+            .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => {
+                last_err = Some(
+                    anyhow!(err).context(format!("failed connecting to upstream target {target}")),
+                );
+            }
+            Err(_) => {
+                last_err = Some(anyhow!(
+                    "timed out connecting to upstream target {target} after {:?}",
+                    DIRECT_CONNECT_ATTEMPT_TIMEOUT
+                ));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("failed connecting to upstream authority {authority}")))
+}
+
 async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
+    let cache_key = authority.to_string();
+    let now = Instant::now();
+    if let Some(entry) = authority_resolution_cache().get(&cache_key) {
+        if entry.expires_at > now {
+            return Ok(entry.targets.clone());
+        }
+        authority_resolution_cache().remove(&cache_key);
+    }
+
     let authority = authority
         .parse::<http::uri::Authority>()
         .with_context(|| format!("invalid authority '{authority}'"))?;
@@ -1126,10 +1172,18 @@ async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
         return Err(anyhow!("dns lookup returned no records for {host}:{port}"));
     }
     sort_socket_addrs_prefer_ipv4(&mut addrs);
-    Ok(addrs
+    let targets = addrs
         .into_iter()
         .map(|addr| format_authority(&addr.ip().to_string(), port))
-        .collect())
+        .collect::<Vec<_>>();
+    authority_resolution_cache().insert(
+        cache_key,
+        AuthorityResolveCacheEntry {
+            expires_at: now + AUTHORITY_RESOLVE_CACHE_TTL,
+            targets: targets.clone(),
+        },
+    );
+    Ok(targets)
 }
 
 fn sort_socket_addrs_prefer_ipv4(addrs: &mut [SocketAddr]) {

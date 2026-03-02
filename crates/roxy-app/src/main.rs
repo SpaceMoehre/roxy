@@ -685,13 +685,7 @@ async fn auto_register_plugins(
         let registration = PluginRegistration {
             name: plugin_name.clone(),
             script_path: script.clone(),
-            hooks: vec![
-                "on_load".to_string(),
-                "on_exchange".to_string(),
-                "on_request_pre_capture".to_string(),
-                "on_response_pre_capture".to_string(),
-                "decoder".to_string(),
-            ],
+            hooks: infer_plugin_hooks(&script),
         };
 
         if let Err(err) = plugins.register(registration).await {
@@ -727,6 +721,35 @@ async fn auto_register_plugins(
             }
         }
     }
+}
+
+fn infer_plugin_hooks(script: &Path) -> Vec<String> {
+    const KNOWN_HOOKS: &[&str] = &[
+        "on_load",
+        "on_exchange",
+        "on_request_pre_capture",
+        "on_response_pre_capture",
+        "decoder",
+    ];
+
+    let source = match fs::read_to_string(script) {
+        Ok(source) => source,
+        Err(_) => return vec!["on_load".to_string()],
+    };
+
+    let mut hooks = Vec::new();
+    for hook in KNOWN_HOOKS {
+        let single = format!("'{hook}'");
+        let double = format!("\"{hook}\"");
+        if source.contains(&single) || source.contains(&double) {
+            hooks.push((*hook).to_string());
+        }
+    }
+
+    if !hooks.iter().any(|hook| hook == "on_load") {
+        hooks.push("on_load".to_string());
+    }
+    hooks
 }
 
 fn discover_plugin_scripts(plugin_dir: &Path) -> Result<Vec<PathBuf>> {

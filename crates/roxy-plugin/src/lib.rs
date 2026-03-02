@@ -251,17 +251,24 @@ impl PluginManager {
             .cloned()
             .collect();
 
+        let settings_snapshot = self.settings.read().await.clone();
         let mut out = Vec::with_capacity(plugins.len());
         for plugin in plugins {
-            let invocation = self
-                .enrich_invocation_payload(
-                    &plugin.name,
-                    PluginInvocation {
-                        hook: hook.to_string(),
-                        payload: payload.clone(),
-                    },
-                )
-                .await;
+            let settings = settings_snapshot
+                .get(&plugin.name)
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+            if !should_invoke_plugin_for_hook(&plugin.name, hook, &settings) {
+                continue;
+            }
+            let invocation = enrich_invocation_payload_with_settings(
+                &plugin.name,
+                PluginInvocation {
+                    hook: hook.to_string(),
+                    payload: payload.clone(),
+                },
+                settings,
+            );
             let response = timeout(timeout_per_plugin, run_python_plugin(&plugin, invocation))
                 .await
                 .map_err(|_| anyhow!("plugin '{}' timed out", plugin.name))
@@ -385,15 +392,6 @@ impl PluginManager {
         plugin_name: &str,
         invocation: PluginInvocation,
     ) -> PluginInvocation {
-        let mut payload_obj = match invocation.payload {
-            Value::Object(map) => map,
-            other => {
-                let mut map = Map::new();
-                map.insert("payload".to_string(), other);
-                map
-            }
-        };
-
         let settings = self
             .settings
             .read()
@@ -402,16 +400,7 @@ impl PluginManager {
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
 
-        payload_obj.insert(
-            "plugin_name".to_string(),
-            Value::String(plugin_name.to_string()),
-        );
-        payload_obj.insert("plugin_settings".to_string(), settings);
-
-        PluginInvocation {
-            hook: invocation.hook,
-            payload: Value::Object(payload_obj),
-        }
+        enrich_invocation_payload_with_settings(plugin_name, invocation, settings)
     }
 }
 
@@ -425,6 +414,66 @@ fn normalize_plugin_settings(value: Value) -> Value {
             Value::Object(map)
         }
     }
+}
+
+fn enrich_invocation_payload_with_settings(
+    plugin_name: &str,
+    invocation: PluginInvocation,
+    settings: Value,
+) -> PluginInvocation {
+    let mut payload_obj = match invocation.payload {
+        Value::Object(map) => map,
+        other => {
+            let mut map = Map::new();
+            map.insert("payload".to_string(), other);
+            map
+        }
+    };
+    payload_obj.insert(
+        "plugin_name".to_string(),
+        Value::String(plugin_name.to_string()),
+    );
+    payload_obj.insert("plugin_settings".to_string(), settings);
+
+    PluginInvocation {
+        hook: invocation.hook,
+        payload: Value::Object(payload_obj),
+    }
+}
+
+fn should_invoke_plugin_for_hook(plugin_name: &str, hook: &str, settings: &Value) -> bool {
+    if plugin_name != "string-substitute" {
+        return true;
+    }
+    if hook != "on_request_pre_capture" && hook != "on_response_pre_capture" {
+        return true;
+    }
+    string_substitute_has_rules(settings)
+}
+
+fn string_substitute_has_rules(settings: &Value) -> bool {
+    let Some(obj) = settings.as_object() else {
+        return false;
+    };
+    if let Some(rules) = obj.get("rules").and_then(Value::as_array) {
+        if rules.iter().any(|rule| {
+            rule.get("search")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        }) {
+            return true;
+        }
+    }
+    for key in ["request_search", "response_search"] {
+        if obj
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 async fn run_python_plugin(
