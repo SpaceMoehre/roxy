@@ -23,6 +23,7 @@ const appState = {
 
 const moduleRegistry = new Map();
 const moduleIntervals = new Map();
+const resizableSplits = [];
 
 window.RoxyModuleHost = {
   registerModule(moduleDef) {
@@ -35,6 +36,204 @@ window.RoxyModuleHost = {
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+function parsePixelValue(value) {
+  const text = String(value || '').trim();
+  if (!text.endsWith('px')) {
+    return null;
+  }
+  const parsed = Number(text.slice(0, -2));
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+
+function elementVisible(el) {
+  if (!el) {
+    return false;
+  }
+  const style = window.getComputedStyle(el);
+  return style.display !== 'none' && style.visibility !== 'hidden';
+}
+
+function initResizableSplit(container, orientation, options = {}) {
+  if (!container || container.dataset.splitInitialized === '1') {
+    return;
+  }
+
+  const panes = Array.from(container.children).filter((child) =>
+    !child.classList.contains('resize-divider')
+  );
+  if (panes.length < 2) {
+    return;
+  }
+
+  const primary = panes[0];
+  const secondary = panes[1];
+  const minPrimary = Math.max(60, Number(options.minPrimary || 120));
+  const minSecondary = Math.max(60, Number(options.minSecondary || 120));
+  const step = Math.max(8, Number(options.step || 16));
+
+  const divider = document.createElement('div');
+  divider.className = 'resize-divider';
+  divider.tabIndex = 0;
+  divider.setAttribute('role', 'separator');
+  divider.setAttribute(
+    'aria-orientation',
+    orientation === 'horizontal' ? 'vertical' : 'horizontal',
+  );
+  divider.setAttribute('aria-label', 'Resize panels');
+  primary.after(divider);
+
+  container.classList.add('resizable-split');
+  container.dataset.splitInitialized = '1';
+  container.dataset.splitOrientation = orientation;
+  container.style.setProperty('--split-min-primary', `${minPrimary}px`);
+  container.style.setProperty('--split-min-secondary', `${minSecondary}px`);
+
+  if (Number.isFinite(options.initialPrimaryPx)) {
+    container.style.setProperty('--split-primary', `${Math.round(options.initialPrimaryPx)}px`);
+  }
+
+  const axisProp = orientation === 'horizontal' ? 'width' : 'height';
+  const pointerCoordProp = orientation === 'horizontal' ? 'clientX' : 'clientY';
+  let dragState = null;
+
+  const ensurePrimarySize = () => {
+    const existing = parsePixelValue(container.style.getPropertyValue('--split-primary'));
+    if (existing != null) {
+      return existing;
+    }
+    const measured = primary.getBoundingClientRect()[axisProp];
+    if (measured > 1) {
+      const rounded = Math.round(measured);
+      container.style.setProperty('--split-primary', `${rounded}px`);
+      return rounded;
+    }
+    return null;
+  };
+
+  const clampPrimary = (rawValue) => {
+    const containerRect = container.getBoundingClientRect();
+    const dividerRect = divider.getBoundingClientRect();
+    const available = Math.max(0, containerRect[axisProp] - dividerRect[axisProp]);
+    const maxPrimary = Math.max(minPrimary, available - minSecondary);
+    return Math.min(Math.max(rawValue, minPrimary), maxPrimary);
+  };
+
+  const applyPrimary = (rawValue) => {
+    const clamped = clampPrimary(rawValue);
+    if (!Number.isFinite(clamped)) {
+      return;
+    }
+    container.style.setProperty('--split-primary', `${Math.round(clamped)}px`);
+  };
+
+  const sync = () => {
+    ensurePrimarySize();
+    divider.hidden = !elementVisible(primary) || !elementVisible(secondary);
+  };
+
+  divider.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || divider.hidden) {
+      return;
+    }
+
+    const startPrimary = ensurePrimarySize() || primary.getBoundingClientRect()[axisProp];
+    dragState = {
+      pointerId: event.pointerId,
+      startPointer: event[pointerCoordProp],
+      startPrimary,
+    };
+
+    divider.setPointerCapture(event.pointerId);
+    document.body.classList.add('app-resizing');
+    event.preventDefault();
+  });
+
+  divider.addEventListener('pointermove', (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) {
+      return;
+    }
+    const delta = event[pointerCoordProp] - dragState.startPointer;
+    applyPrimary(dragState.startPrimary + delta);
+  });
+
+  const endDrag = (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) {
+      return;
+    }
+    if (divider.hasPointerCapture(event.pointerId)) {
+      divider.releasePointerCapture(event.pointerId);
+    }
+    dragState = null;
+    document.body.classList.remove('app-resizing');
+  };
+
+  divider.addEventListener('pointerup', endDrag);
+  divider.addEventListener('pointercancel', endDrag);
+  divider.addEventListener('lostpointercapture', () => {
+    dragState = null;
+    document.body.classList.remove('app-resizing');
+  });
+
+  divider.addEventListener('keydown', (event) => {
+    if (divider.hidden) {
+      return;
+    }
+
+    let delta = 0;
+    if (orientation === 'horizontal') {
+      if (event.key === 'ArrowLeft') delta = -step;
+      if (event.key === 'ArrowRight') delta = step;
+    } else {
+      if (event.key === 'ArrowUp') delta = -step;
+      if (event.key === 'ArrowDown') delta = step;
+    }
+    if (!delta) {
+      return;
+    }
+
+    event.preventDefault();
+    const current = ensurePrimarySize() || primary.getBoundingClientRect()[axisProp];
+    applyPrimary(current + delta);
+  });
+
+  resizableSplits.push({ sync });
+  sync();
+}
+
+function syncResizableSplits() {
+  for (const split of resizableSplits) {
+    split.sync();
+  }
+}
+
+function initResizablePanels() {
+  const horizontalSelectors = [
+    '.split-grid:not(.target-tree)',
+    '.queue-layout',
+    '.proxy-history-detail-grid',
+    '.repeater-split',
+  ];
+
+  for (const selector of horizontalSelectors) {
+    for (const el of document.querySelectorAll(selector)) {
+      initResizableSplit(el, 'horizontal');
+    }
+  }
+
+  for (const el of document.querySelectorAll('.proxy-history-layout')) {
+    initResizableSplit(el, 'vertical', {
+      minPrimary: 140,
+      minSecondary: 140,
+      initialPrimaryPx: 240,
+    });
+  }
+
+  syncResizableSplits();
 }
 
 function escapeHtml(text) {
@@ -320,6 +519,7 @@ function activateTab(tabName) {
   if (selectedTab) selectedTab.classList.add('active');
   const selectedPanel = qs(`tab-${tabName}`);
   if (selectedPanel) selectedPanel.classList.add('active');
+  syncResizableSplits();
 }
 
 function pluginTabButton() {
@@ -456,6 +656,7 @@ function activateProxySubtab(tabName) {
   if (selectedTab) selectedTab.classList.add('active');
   const selectedPanel = qs(`proxy-subpanel-${tabName}`);
   if (selectedPanel) selectedPanel.classList.add('active');
+  syncResizableSplits();
 }
 
 function parseHeadersText(text) {
@@ -939,6 +1140,7 @@ function renderProxyHistoryDetail() {
     reqWrap.style.display = 'none';
     respWrap.style.display = 'none';
     meta.textContent = 'No request selected';
+    syncResizableSplits();
     return;
   }
 
@@ -955,6 +1157,7 @@ function renderProxyHistoryDetail() {
   detailGrid.classList.toggle('single-pane', mode !== 'both');
   reqWrap.style.display = mode === 'response' ? 'none' : 'block';
   respWrap.style.display = mode === 'request' ? 'none' : 'block';
+  syncResizableSplits();
 }
 
 function selectedHistorySearchRow() {
@@ -1826,6 +2029,7 @@ function bindEvents() {
     if (menu && !menu.hidden) {
       positionPluginsTopMenu();
     }
+    syncResizableSplits();
   });
 
   window.addEventListener('keydown', (event) => {
@@ -1847,6 +2051,7 @@ async function init() {
   renderTabs();
   renderProxySubtabs();
   initSettingsAccordion();
+  initResizablePanels();
   window.__roxySelectedPlugin = selectedPluginFromStorage();
   setProxyHistoryMode('both');
   bindEvents();
