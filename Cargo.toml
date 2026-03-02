@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/roxy-core",
+  "crates/roxy-tls",
   "crates/roxy-storage",
   "crates/roxy-api",
   "crates/roxy-plugin",
@@ -44,3 +45,4 @@ tempfile = "3.19"
 url = "2.5"
 zstd = "0.13"
 boring = "4.21"
+roxy-tls = { path = "crates/roxy-tls" }

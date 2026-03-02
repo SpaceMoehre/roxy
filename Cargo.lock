@@ -2287,18 +2287,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64",
- "boring",
  "brotli",
  "bytes",
  "dashmap",
  "flate2",
- "hickory-resolver",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "rcgen",
+ "roxy-tls",
  "serde",
  "serde_json",
  "tempfile",
@@ -2340,6 +2338,20 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "roxy-tls"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "boring",
+ "brotli",
+ "dashmap",
+ "hickory-resolver",
+ "tokio-boring",
+ "tracing",
 ]
 
 [[package]]

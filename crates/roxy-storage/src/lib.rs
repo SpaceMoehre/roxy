@@ -2,7 +2,7 @@
 //!
 //! Exposes public types and functions used by the `roxy` runtime and API surface.
 
-use std::{path::Path, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use roxy_core::model::CapturedExchange;
@@ -78,16 +78,15 @@ impl StorageManager {
             .with_context(|| format!("failed creating tantivy dir {tantivy_dir:?}"))?;
 
         let db = sled::open(&sled_dir).context("failed opening sled db")?;
-        let (index, fields) = open_or_create_index(&tantivy_dir)?;
-
-        let index_reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()
-            .context("failed building tantivy reader")?;
-        let index_writer = index
-            .writer(20_000_000)
-            .context("failed creating tantivy writer")?;
+        let (index, fields, index_reader, index_writer) = initialize_search_index(&tantivy_dir)
+            .or_else(|err| {
+                warn!(
+                    %err,
+                    path = %tantivy_dir.display(),
+                    "tantivy index is unreadable; rebuilding from sled contents"
+                );
+                rebuild_search_index_from_sled(&db, &tantivy_dir)
+            })?;
 
         Ok(Self {
             inner: Arc::new(StorageInner {
@@ -372,6 +371,78 @@ fn open_or_create_index(path: &Path) -> Result<(Index, SearchFields)> {
     Ok((index, fields))
 }
 
+fn initialize_search_index(
+    path: &Path,
+) -> Result<(Index, SearchFields, IndexReader, tantivy::IndexWriter)> {
+    let (index, fields) = open_or_create_index(path)?;
+    let index_reader = index
+        .reader_builder()
+        // Search calls `reload()` explicitly, so a background watcher is unnecessary and can
+        // emit noisy errors when files disappear unexpectedly.
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .context("failed building tantivy reader")?;
+    let index_writer = index
+        .writer(20_000_000)
+        .context("failed creating tantivy writer")?;
+    Ok((index, fields, index_reader, index_writer))
+}
+
+fn rebuild_search_index_from_sled(
+    db: &sled::Db,
+    path: &Path,
+) -> Result<(Index, SearchFields, IndexReader, tantivy::IndexWriter)> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed removing corrupt tantivy directory {path:?}"))?;
+    }
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed recreating tantivy directory {path:?}"))?;
+
+    let (index, fields) = open_or_create_index(path)?;
+    let mut index_writer = index
+        .writer(20_000_000)
+        .context("failed creating tantivy writer for rebuilt index")?;
+
+    for row in db.iter() {
+        let (_key, value) = row.context("failed iterating sled entries while rebuilding index")?;
+        let exchange = match serde_json::from_slice::<CapturedExchange>(&value) {
+            Ok(exchange) => exchange,
+            Err(err) => {
+                warn!(%err, "skipping invalid stored exchange during tantivy rebuild");
+                continue;
+            }
+        };
+
+        let request_blob = String::from_utf8_lossy(exchange.request.raw.as_ref()).to_string();
+        let response_blob = exchange
+            .response
+            .as_ref()
+            .map(build_response_blob_text)
+            .unwrap_or_default();
+        index_writer.add_document(doc!(
+            fields.id => exchange.request.id.to_string(),
+            fields.method => exchange.request.method.clone(),
+            fields.host => exchange.request.host.clone(),
+            fields.uri => exchange.request.uri.clone(),
+            fields.request_body => request_blob,
+            fields.response_body => response_blob,
+        ))?;
+    }
+
+    index_writer
+        .commit()
+        .context("failed committing rebuilt tantivy index")?;
+
+    let index_reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .context("failed building tantivy reader for rebuilt index")?;
+
+    Ok((index, fields, index_reader, index_writer))
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -553,5 +624,33 @@ mod tests {
             .expect("response body blob search");
         assert_eq!(response_body_hits.len(), 1);
         assert_eq!(response_body_hits[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn open_rebuilds_tantivy_index_when_segment_files_are_missing() {
+        let tmp = TempDir::new().expect("tmp");
+        let exchange = fake_exchange();
+
+        {
+            let manager = StorageManager::open(tmp.path()).expect("storage");
+            manager
+                .persist_exchange(&exchange)
+                .await
+                .expect("persist exchange");
+        }
+
+        let tantivy_dir = tmp.path().join("tantivy");
+        let term_file = std::fs::read_dir(&tantivy_dir)
+            .expect("read tantivy dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("term"))
+            .expect("at least one tantivy term file exists");
+        std::fs::remove_file(&term_file).expect("remove one tantivy term file");
+
+        let manager = StorageManager::open(tmp.path()).expect("storage should rebuild index");
+        let hits = manager.search("example.com", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, exchange.request.id);
     }
 }

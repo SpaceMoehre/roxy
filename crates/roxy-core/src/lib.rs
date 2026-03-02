@@ -7,7 +7,6 @@ pub mod outbound;
 pub mod proxy;
 pub mod raw_http;
 pub mod state;
-mod tls_ech;
 
 pub use cert::{CaCertificate, CertManager, DomainCertificate};
 pub use config::{DebugLoggingConfig, ProxyConfig};

@@ -1,0 +1,15 @@
+[package]
+name = "roxy-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+boring.workspace = true
+brotli.workspace = true
+dashmap.workspace = true
+hickory-resolver.workspace = true
+tokio-boring.workspace = true
+tracing.workspace = true

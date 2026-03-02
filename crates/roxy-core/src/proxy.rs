@@ -9,25 +9,17 @@ use std::{
     io::Read,
     net::SocketAddr,
     net::{Ipv4Addr, Ipv6Addr},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
-use boring::{
-    pkey::PKey,
-    ssl::{
-        CertificateCompressionAlgorithm, CertificateCompressor, SslAcceptor, SslConnector,
-        SslMethod, SslVerifyMode, SslVersion,
-    },
-    x509::X509,
-};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{HOST, HeaderName, HeaderValue},
+    header::{HOST, HeaderName, HeaderValue, ORIGIN},
     service::service_fn,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -39,6 +31,11 @@ use tokio::{
 use tokio_boring::{accept as tls_accept, connect as tls_connect};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
+
+use roxy_tls::{
+    apply_ech_client_config, build_downstream_mitm_acceptor,
+    client_connector as upstream_tls_connector, ech_retry_from_handshake_error,
+};
 
 use crate::{
     cert::CertManager,
@@ -53,7 +50,6 @@ use crate::{
         AppState, InterceptDecision, ResponseInterceptDecision, UpstreamChainMode,
         UpstreamProxyEntry, UpstreamProxyProtocol, UpstreamProxySettings,
     },
-    tls_ech::{apply_ech_client_config, ech_retry_from_handshake_error},
 };
 
 #[derive(Clone)]
@@ -221,6 +217,7 @@ impl ProxyEngine {
         self: Arc<Self>,
         request: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let cors_origin = request.headers().get(ORIGIN).cloned();
         if request.method() == Method::CONNECT {
             return Ok(self.handle_connect(request));
         }
@@ -233,9 +230,10 @@ impl ProxyEngine {
                     error_chain = %format_error_chain(&err),
                     "proxy forwarding failed"
                 );
-                Ok(build_text_response(
+                Ok(build_text_response_with_origin(
                     StatusCode::BAD_GATEWAY,
                     "upstream forwarding failed",
+                    cors_origin.as_ref(),
                 ))
             }
         }
@@ -317,32 +315,7 @@ impl ProxyEngine {
             .await
             .with_context(|| format!("failed creating domain certificate for {domain}"))?;
 
-        let cert = X509::from_der(&leaf.cert_der)
-            .context("failed parsing generated leaf certificate for boring TLS")?;
-        let key = PKey::private_key_from_der(&leaf.key_der)
-            .context("failed parsing generated leaf private key for boring TLS")?;
-        let mut tls_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
-            .context("failed building downstream TLS acceptor")?;
-        tls_builder
-            .set_min_proto_version(Some(SslVersion::TLS1_2))
-            .context("failed setting downstream TLS minimum protocol version")?;
-        tls_builder
-            .set_max_proto_version(Some(SslVersion::TLS1_3))
-            .context("failed setting downstream TLS maximum protocol version")?;
-        tls_builder
-            .set_certificate(&cert)
-            .context("failed assigning downstream certificate")?;
-        tls_builder
-            .set_private_key(&key)
-            .context("failed assigning downstream private key")?;
-        tls_builder
-            .check_private_key()
-            .context("downstream certificate/private key mismatch")?;
-        tls_builder
-            .set_alpn_protos(b"\x08http/1.1")
-            .context("failed configuring downstream ALPN protocol list")?;
-
-        let acceptor = tls_builder.build();
+        let acceptor = build_downstream_mitm_acceptor(&leaf.cert_der, &leaf.key_der)?;
         let tls_stream = tls_accept(&acceptor, upgraded)
             .await
             .map_err(|err| anyhow!("TLS handshake with downstream client failed: {err}"))?;
@@ -353,6 +326,7 @@ impl ProxyEngine {
             let engine = engine.clone();
             let authority = authority.clone();
             async move {
+                let cors_origin = req.headers().get(ORIGIN).cloned();
                 match engine
                     .forward_http_request(req, "https", Some(authority.as_str()))
                     .await
@@ -365,9 +339,10 @@ impl ProxyEngine {
                             error_chain = %format_error_chain(&err),
                             "mitm https forwarding failed"
                         );
-                        Ok(build_text_response(
+                        Ok(build_text_response_with_origin(
                             StatusCode::BAD_GATEWAY,
                             "mitm upstream forwarding failed",
+                            cors_origin.as_ref(),
                         ))
                     }
                 }
@@ -451,7 +426,7 @@ impl ProxyEngine {
                 let host = uri
                     .host()
                     .ok_or_else(|| anyhow!("request URI missing host"))?;
-                let connector = upstream_tls_connector();
+                let connector = upstream_tls_connector(false);
                 let mut tls_config = connector
                     .configure()
                     .context("failed preparing upstream boring TLS connector")?;
@@ -537,6 +512,7 @@ impl ProxyEngine {
         let request_id = Uuid::new_v4();
 
         let (parts, body) = request.into_parts();
+        let cors_origin = parts.headers.get(ORIGIN).cloned();
         let raw_body = body
             .collect()
             .await
@@ -596,9 +572,10 @@ impl ProxyEngine {
                 }
                 Ok(InterceptDecision::Drop) => {
                     self.log_debug(request_id, "request interceptor decision: drop");
-                    return Ok(build_text_response(
+                    return Ok(build_text_response_with_origin(
                         StatusCode::FORBIDDEN,
                         "request dropped by interceptor",
+                        cors_origin.as_ref(),
                     ));
                 }
                 Ok(InterceptDecision::Mutate(mutation)) => {
@@ -608,9 +585,10 @@ impl ProxyEngine {
                 }
                 Err(_) => {
                     self.log_debug(request_id, "request interceptor canceled pending request");
-                    return Ok(build_text_response(
+                    return Ok(build_text_response_with_origin(
                         StatusCode::CONFLICT,
                         "interceptor canceled request",
+                        cors_origin.as_ref(),
                     ));
                 }
             }
@@ -732,9 +710,10 @@ impl ProxyEngine {
                         error: Some("response dropped by interceptor".to_string()),
                     };
                     let _ = self.event_tx.try_send(EventEnvelope::Exchange(exchange));
-                    return Ok(build_text_response(
+                    return Ok(build_text_response_with_origin(
                         StatusCode::FORBIDDEN,
                         "response dropped by interceptor",
+                        cors_origin.as_ref(),
                     ));
                 }
                 Ok(ResponseInterceptDecision::Mutate(mutation)) => {
@@ -744,9 +723,10 @@ impl ProxyEngine {
                 }
                 Err(_) => {
                     self.log_debug(request_id, "response interceptor canceled pending response");
-                    return Ok(build_text_response(
+                    return Ok(build_text_response_with_origin(
                         StatusCode::CONFLICT,
                         "response interceptor canceled response",
+                        cors_origin.as_ref(),
                     ));
                 }
             }
@@ -1116,74 +1096,6 @@ fn uri_authority_with_default_port(uri: &http::Uri) -> Result<String> {
     Ok(format_authority(host, port))
 }
 
-fn upstream_tls_connector() -> Arc<SslConnector> {
-    static CONNECTOR: OnceLock<Arc<SslConnector>> = OnceLock::new();
-    CONNECTOR
-        .get_or_init(|| {
-            let mut builder = SslConnector::builder(SslMethod::tls_client())
-                .expect("failed building upstream boring TLS connector");
-            builder
-                .set_min_proto_version(Some(SslVersion::TLS1_2))
-                .expect("failed setting upstream TLS minimum protocol version");
-            builder
-                .set_max_proto_version(Some(SslVersion::TLS1_3))
-                .expect("failed setting upstream TLS maximum protocol version");
-            if let Err(err) = builder.set_curves_list("X25519MLKEM768") {
-                warn!(
-                    %err,
-                    "upstream does not support X25519MLKEM768 in this BoringSSL build; falling back to X25519"
-                );
-                builder
-                    .set_curves_list("X25519")
-                    .expect("failed setting upstream TLS fallback key exchange groups");
-            }
-            builder
-                .set_sigalgs_list("ecdsa_secp256r1_sha256")
-                .expect("failed setting upstream TLS signature algorithms");
-            builder.enable_signed_cert_timestamps();
-            if let Err(err) = builder.add_certificate_compression_algorithm(BrotliCertCompression)
-            {
-                warn!(
-                    %err,
-                    "failed enabling TLS certificate compression extension for upstream client"
-                );
-            }
-            builder.set_permute_extensions(false);
-            builder.set_verify(SslVerifyMode::PEER);
-            builder
-                .set_alpn_protos(b"\x02h2\x08http/1.1")
-                .expect("failed configuring upstream boring ALPN protocol list");
-            Arc::new(builder.build())
-        })
-        .clone()
-}
-
-#[derive(Clone, Copy, Debug)]
-struct BrotliCertCompression;
-
-impl CertificateCompressor for BrotliCertCompression {
-    const ALGORITHM: CertificateCompressionAlgorithm = CertificateCompressionAlgorithm::BROTLI;
-    const CAN_COMPRESS: bool = false;
-    const CAN_DECOMPRESS: bool = true;
-
-    fn compress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
-    where
-        W: io::Write,
-    {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "certificate compression is not used on client-side sends",
-        ))
-    }
-
-    fn decompress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
-    where
-        W: io::Write,
-    {
-        brotli::BrotliDecompress(&mut io::Cursor::new(input), output)
-    }
-}
-
 fn hash_seed(input: &[u8]) -> u64 {
     let mut out: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in input {
@@ -1507,10 +1419,25 @@ fn build_effective_uri(
 }
 
 fn build_text_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
-    Response::builder()
+    build_text_response_with_origin(status, msg, None)
+}
+
+fn build_text_response_with_origin(
+    status: StatusCode,
+    msg: &str,
+    origin: Option<&HeaderValue>,
+) -> Response<Full<Bytes>> {
+    let mut builder = Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain")
-        .header(http::header::CONTENT_LENGTH, msg.len().to_string())
+        .header(http::header::CONTENT_LENGTH, msg.len().to_string());
+    if let Some(origin) = origin {
+        builder = builder
+            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone())
+            .header(http::header::VARY, "Origin");
+    }
+
+    builder
         .body(Full::new(Bytes::from(msg.to_owned())))
         .expect("valid static response")
 }
