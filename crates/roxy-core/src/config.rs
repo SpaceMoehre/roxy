@@ -1,6 +1,13 @@
+//! roxy_core `config` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{net::SocketAddr, time::Duration};
 
 #[derive(Clone, Debug)]
+/// Represents `DebugLoggingConfig`.
+///
+/// See also: [`DebugLoggingConfig`].
 pub struct DebugLoggingConfig {
     pub enabled: bool,
     pub log_bodies: bool,
@@ -18,6 +25,9 @@ impl Default for DebugLoggingConfig {
 }
 
 #[derive(Clone, Debug)]
+/// Represents `ProxyConfig`.
+///
+/// See also: [`ProxyConfig`].
 pub struct ProxyConfig {
     pub bind: SocketAddr,
     pub request_timeout: Duration,

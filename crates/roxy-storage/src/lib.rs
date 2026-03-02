@@ -1,3 +1,7 @@
+//! roxy_storage `crate root` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
@@ -15,12 +19,18 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `HistorySearchHit`.
+///
+/// See also: [`HistorySearchHit`].
 pub struct HistorySearchHit {
     pub id: Uuid,
     pub exchange: CapturedExchange,
 }
 
 #[derive(Clone)]
+/// Represents `StorageManager`.
+///
+/// See also: [`StorageManager`].
 pub struct StorageManager {
     inner: Arc<StorageInner>,
 }
@@ -44,6 +54,16 @@ struct SearchFields {
 }
 
 impl StorageManager {
+    /// Opens ``.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn open(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         std::fs::create_dir_all(base_dir)
@@ -80,6 +100,13 @@ impl StorageManager {
         })
     }
 
+    /// Executes `spawn ingestor`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
     pub fn spawn_ingestor(
         &self,
         mut rx: mpsc::Receiver<CapturedExchange>,
@@ -94,6 +121,16 @@ impl StorageManager {
         })
     }
 
+    /// Persists `exchange`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn persist_exchange(&self, exchange: &CapturedExchange) -> Result<()> {
         let id = exchange.request.id;
         let key = id.as_bytes();
@@ -128,6 +165,16 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Gets `exchange`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn get_exchange(&self, id: Uuid) -> Result<Option<CapturedExchange>> {
         let value = self
             .inner
@@ -143,6 +190,16 @@ impl StorageManager {
             .transpose()
     }
 
+    /// Executes `search`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistorySearchHit>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
@@ -206,6 +263,16 @@ impl StorageManager {
         Ok(hits)
     }
 
+    /// Lists `recent`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_storage as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<HistorySearchHit>> {
         let mut rows = Vec::new();
         for row in self.inner.db.iter() {

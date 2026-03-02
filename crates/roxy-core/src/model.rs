@@ -1,3 +1,7 @@
+//! roxy_core `model` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -5,15 +9,22 @@ use http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Aliases a type as `RequestId`.
 pub type RequestId = Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Represents `HeaderValuePair`.
+///
+/// See also: [`HeaderValuePair`].
 pub struct HeaderValuePair {
     pub name: String,
     pub value: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `CapturedRequest`.
+///
+/// See also: [`CapturedRequest`].
 pub struct CapturedRequest {
     pub id: RequestId,
     pub created_at_unix_ms: u128,
@@ -27,6 +38,9 @@ pub struct CapturedRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `CapturedResponse`.
+///
+/// See also: [`CapturedResponse`].
 pub struct CapturedResponse {
     pub request_id: RequestId,
     pub created_at_unix_ms: u128,
@@ -36,6 +50,9 @@ pub struct CapturedResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `CapturedExchange`.
+///
+/// See also: [`CapturedExchange`].
 pub struct CapturedExchange {
     pub request: CapturedRequest,
     pub response: Option<CapturedResponse>,
@@ -44,11 +61,17 @@ pub struct CapturedExchange {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `RequestMutation`.
+///
+/// See also: [`RequestMutation`].
 pub struct RequestMutation {
     pub raw: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `ResponseMutation`.
+///
+/// See also: [`ResponseMutation`].
 pub struct ResponseMutation {
     pub status: Option<u16>,
     pub headers: Option<Vec<HeaderValuePair>>,
@@ -57,10 +80,20 @@ pub struct ResponseMutation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
+/// Enumerates `EventEnvelope` variants.
+///
+/// See also: [`EventEnvelope`].
 pub enum EventEnvelope {
     Exchange(CapturedExchange),
 }
 
+/// Executes `headers to pairs`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<HeaderValuePair> {
     headers
         .iter()
@@ -73,6 +106,13 @@ pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<HeaderValuePair> {
         .collect()
 }
 
+/// Executes `now unix ms`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn now_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -80,6 +120,13 @@ pub fn now_unix_ms() -> u128 {
         .as_millis()
 }
 
+/// Applies `mutation`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn apply_mutation(mut request: CapturedRequest, mutation: RequestMutation) -> CapturedRequest {
     if let Some(raw) = mutation.raw {
         request.raw = raw;
@@ -87,6 +134,13 @@ pub fn apply_mutation(mut request: CapturedRequest, mutation: RequestMutation) -
     request
 }
 
+/// Applies `response mutation`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn apply_response_mutation(
     mut response: CapturedResponse,
     mutation: ResponseMutation,

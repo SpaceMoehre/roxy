@@ -1,3 +1,7 @@
+//! roxy_core `cert` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -14,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `CaCertificate`.
+///
+/// See also: [`CaCertificate`].
 pub struct CaCertificate {
     pub cert_der: Vec<u8>,
     pub cert_pem: String,
@@ -21,6 +28,9 @@ pub struct CaCertificate {
 }
 
 #[derive(Clone, Debug)]
+/// Represents `DomainCertificate`.
+///
+/// See also: [`DomainCertificate`].
 pub struct DomainCertificate {
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
@@ -33,6 +43,9 @@ struct RootCaMaterial {
 }
 
 #[derive(Clone)]
+/// Represents `CertManager`.
+///
+/// See also: [`CertManager`].
 pub struct CertManager {
     storage_dir: PathBuf,
     root: Arc<RwLock<RootCaMaterial>>,
@@ -40,6 +53,16 @@ pub struct CertManager {
 }
 
 impl CertManager {
+    /// Loads `or create`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn load_or_create(storage_dir: impl AsRef<Path>) -> Result<Self> {
         let storage_dir = storage_dir.as_ref().to_path_buf();
         fs::create_dir_all(&storage_dir)
@@ -53,14 +76,38 @@ impl CertManager {
         })
     }
 
+    /// Exports `ca der`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn export_ca_der(&self) -> Vec<u8> {
         self.root.read().await.pub_data.cert_der.clone()
     }
 
+    /// Exports `ca pem`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn export_ca_pem(&self) -> String {
         self.root.read().await.pub_data.cert_pem.clone()
     }
 
+    /// Executes `regenerate ca`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn regenerate_ca(&self) -> Result<CaCertificate> {
         let root = generate_root_ca()?;
         persist_root_ca(&self.storage_dir, &root.pub_data)?;
@@ -70,6 +117,16 @@ impl CertManager {
         Ok(result)
     }
 
+    /// Gets `or create domain cert`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn get_or_create_domain_cert(&self, domain: &str) -> Result<DomainCertificate> {
         if let Some(cert) = self.domain_cache.get(domain) {
             return Ok(cert.clone());

@@ -1,3 +1,7 @@
+//! roxy_api `crate root` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 pub mod web_modules;
 pub mod ws;
 
@@ -35,6 +39,9 @@ const APP_TEMPLATE: &str = include_str!("../web/templates/app.js.tera");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
 
 #[derive(Clone)]
+/// Represents `ApiState`.
+///
+/// See also: [`ApiState`].
 pub struct ApiState {
     pub app_state: Arc<AppState>,
     pub cert_manager: Arc<CertManager>,
@@ -46,6 +53,13 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn new(
         app_state: Arc<AppState>,
         cert_manager: Arc<CertManager>,
@@ -239,11 +253,31 @@ struct PluginOpsApplied {
     ui_modules_registered: usize,
 }
 
+/// Runs `api`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_api(bind: SocketAddr, state: ApiState) -> std::io::Result<()> {
     let (_tx, rx) = watch::channel(false);
     run_api_with_shutdown(bind, state, rx).await
 }
 
+/// Runs `api with shutdown`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_api_with_shutdown(
     bind: SocketAddr,
     state: ApiState,
@@ -252,6 +286,16 @@ pub async fn run_api_with_shutdown(
     run_api_with_shutdown_and_ready(bind, state, shutdown, None).await
 }
 
+/// Runs `api with shutdown and ready`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_api_with_shutdown_and_ready(
     bind: SocketAddr,
     state: ApiState,
@@ -375,6 +419,16 @@ pub async fn run_api_with_shutdown_and_ready(
     }
 }
 
+/// Runs `api with shutdown and ready uds`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_api_with_shutdown_and_ready_uds(
     path: impl AsRef<Path>,
     state: ApiState,

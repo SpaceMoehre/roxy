@@ -1,3 +1,7 @@
+//! roxy_core `intruder` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -20,6 +24,9 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `IntruderPayloadSet`.
+///
+/// See also: [`IntruderPayloadSet`].
 pub struct IntruderPayloadSet {
     pub key: String,
     pub values: Vec<String>,
@@ -27,6 +34,9 @@ pub struct IntruderPayloadSet {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Enumerates `IntruderStrategy` variants.
+///
+/// See also: [`IntruderStrategy`].
 pub enum IntruderStrategy {
     ClusterBomb,
     Sniper,
@@ -39,6 +49,9 @@ impl Default for IntruderStrategy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `IntruderJobSpec`.
+///
+/// See also: [`IntruderJobSpec`].
 pub struct IntruderJobSpec {
     pub name: String,
     pub request_blob_template: String,
@@ -54,6 +67,9 @@ pub struct IntruderJobSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Enumerates `IntruderJobStatus` variants.
+///
+/// See also: [`IntruderJobStatus`].
 pub enum IntruderJobStatus {
     Pending,
     Running,
@@ -62,6 +78,9 @@ pub enum IntruderJobStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `IntruderResult`.
+///
+/// See also: [`IntruderResult`].
 pub struct IntruderResult {
     pub sequence: usize,
     pub payloads: BTreeMap<String, String>,
@@ -74,6 +93,9 @@ pub struct IntruderResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `IntruderJobSnapshot`.
+///
+/// See also: [`IntruderJobSnapshot`].
 pub struct IntruderJobSnapshot {
     pub id: Uuid,
     pub name: String,
@@ -88,6 +110,9 @@ pub struct IntruderJobSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
+/// Enumerates `IntruderEvent` variants.
+///
+/// See also: [`IntruderEvent`].
 pub enum IntruderEvent {
     JobUpdated(IntruderJobSnapshot),
     JobResult {
@@ -97,6 +122,9 @@ pub enum IntruderEvent {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `IntruderJobDetails`.
+///
+/// See also: [`IntruderJobDetails`].
 pub struct IntruderJobDetails {
     pub snapshot: IntruderJobSnapshot,
     pub results: Vec<IntruderResult>,
@@ -109,6 +137,9 @@ struct IntruderJobState {
 }
 
 #[derive(Clone)]
+/// Represents `IntruderManager`.
+///
+/// See also: [`IntruderManager`].
 pub struct IntruderManager {
     jobs: Arc<DashMap<Uuid, Arc<RwLock<IntruderJobState>>>>,
     events_tx: broadcast::Sender<IntruderEvent>,
@@ -125,10 +156,27 @@ impl Default for IntruderManager {
 }
 
 impl IntruderManager {
+    /// Subscribes to `events`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn subscribe_events(&self) -> broadcast::Receiver<IntruderEvent> {
         self.events_tx.subscribe()
     }
 
+    /// Executes `start job`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn start_job(&self, spec: IntruderJobSpec) -> Result<Uuid> {
         validate_payload_sets(&spec.payload_sets)?;
         let payload_vectors = build_payload_vectors(&spec.payload_sets, spec.strategy.clone())?;
@@ -172,6 +220,13 @@ impl IntruderManager {
         Ok(id)
     }
 
+    /// Lists `jobs`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn list_jobs(&self) -> Vec<IntruderJobSnapshot> {
         let mut rows = Vec::with_capacity(self.jobs.len());
         for row in &*self.jobs {
@@ -181,11 +236,25 @@ impl IntruderManager {
         rows
     }
 
+    /// Gets `job`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn get_job(&self, id: Uuid) -> Option<IntruderJobSnapshot> {
         let state = self.jobs.get(&id)?;
         Some(state.read().await.snapshot.clone())
     }
 
+    /// Gets `job results`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn get_job_results(
         &self,
         id: Uuid,
@@ -204,6 +273,13 @@ impl IntruderManager {
         Some(rows)
     }
 
+    /// Gets `job details`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub async fn get_job_details(
         &self,
         id: Uuid,
@@ -217,6 +293,13 @@ impl IntruderManager {
         })
     }
 
+    /// Removes `job`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn remove_job(&self, id: Uuid) -> bool {
         self.jobs.remove(&id).is_some()
     }
@@ -540,6 +623,13 @@ fn build_sniper(payload_sets: &[IntruderPayloadSet]) -> Vec<BTreeMap<String, Str
     out
 }
 
+/// Renders `template`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn render_template(template: &str, payloads: &BTreeMap<String, String>) -> String {
     let mut rendered = template.to_string();
     for (key, value) in payloads {

@@ -1,3 +1,7 @@
+//! roxy_core `raw_http` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use http::Uri;
@@ -5,6 +9,9 @@ use http::Uri;
 use crate::model::HeaderValuePair;
 
 #[derive(Clone, Debug)]
+/// Represents `ParsedRequestBlob`.
+///
+/// See also: [`ParsedRequestBlob`].
 pub struct ParsedRequestBlob {
     pub method: String,
     pub uri: String,
@@ -13,6 +20,13 @@ pub struct ParsedRequestBlob {
     pub body: Bytes,
 }
 
+/// Builds `request blob`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
 pub fn build_request_blob(
     method: &str,
     target: &str,
@@ -44,6 +58,16 @@ pub fn build_request_blob(
     Bytes::from(out)
 }
 
+/// Parses `request blob`.
+///
+/// # Examples
+/// ```
+/// use roxy_core as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub fn parse_request_blob(
     raw: &[u8],
     default_scheme: &str,

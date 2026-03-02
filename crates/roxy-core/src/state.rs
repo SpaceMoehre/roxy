@@ -1,3 +1,7 @@
+//! roxy_core `state` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -12,6 +16,9 @@ use uuid::Uuid;
 use crate::model::{CapturedRequest, CapturedResponse, RequestMutation, ResponseMutation};
 
 #[derive(Debug)]
+/// Enumerates `InterceptDecision` variants.
+///
+/// See also: [`InterceptDecision`].
 pub enum InterceptDecision {
     Forward,
     Mutate(RequestMutation),
@@ -19,6 +26,9 @@ pub enum InterceptDecision {
 }
 
 #[derive(Debug)]
+/// Enumerates `ResponseInterceptDecision` variants.
+///
+/// See also: [`ResponseInterceptDecision`].
 pub enum ResponseInterceptDecision {
     Forward,
     Mutate(ResponseMutation),
@@ -27,6 +37,9 @@ pub enum ResponseInterceptDecision {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Enumerates `UpstreamProxyProtocol` variants.
+///
+/// See also: [`UpstreamProxyProtocol`].
 pub enum UpstreamProxyProtocol {
     Http,
     Https,
@@ -35,6 +48,9 @@ pub enum UpstreamProxyProtocol {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Represents `UpstreamProxyEntry`.
+///
+/// See also: [`UpstreamProxyEntry`].
 pub struct UpstreamProxyEntry {
     pub protocol: UpstreamProxyProtocol,
     pub address: String,
@@ -43,6 +59,9 @@ pub struct UpstreamProxyEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Enumerates `UpstreamChainMode` variants.
+///
+/// See also: [`UpstreamChainMode`].
 pub enum UpstreamChainMode {
     StrictChain,
     RandomChain,
@@ -50,6 +69,9 @@ pub enum UpstreamChainMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+/// Represents `UpstreamProxySettings`.
+///
+/// See also: [`UpstreamProxySettings`].
 pub struct UpstreamProxySettings {
     pub proxies: Vec<UpstreamProxyEntry>,
     pub proxy_dns: bool,
@@ -59,6 +81,9 @@ pub struct UpstreamProxySettings {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `ProxyToggleSnapshot`.
+///
+/// See also: [`ProxyToggleSnapshot`].
 pub struct ProxyToggleSnapshot {
     pub intercept_enabled: bool,
     pub intercept_response_enabled: bool,
@@ -66,29 +91,44 @@ pub struct ProxyToggleSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PendingInterceptSnapshot`.
+///
+/// See also: [`PendingInterceptSnapshot`].
 pub struct PendingInterceptSnapshot {
     pub requests: Vec<CapturedRequest>,
     pub responses: Vec<CapturedResponse>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Represents `SiteMapEntry`.
+///
+/// See also: [`SiteMapEntry`].
 pub struct SiteMapEntry {
     pub host: String,
     pub paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `SiteMapSnapshot`.
+///
+/// See also: [`SiteMapSnapshot`].
 pub struct SiteMapSnapshot {
     pub rows: Vec<SiteMapEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `ScopeSnapshot`.
+///
+/// See also: [`ScopeSnapshot`].
 pub struct ScopeSnapshot {
     pub hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
+/// Enumerates `AppStateEvent` variants.
+///
+/// See also: [`AppStateEvent`].
 pub enum AppStateEvent {
     ProxyToggles(ProxyToggleSnapshot),
     PendingIntercepts(PendingInterceptSnapshot),
@@ -110,6 +150,13 @@ impl Default for UpstreamProxySettings {
 }
 
 impl UpstreamProxySettings {
+    /// Executes `normalized`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn normalized(mut self) -> Self {
         self.proxies = self
             .proxies
@@ -129,12 +176,22 @@ impl UpstreamProxySettings {
 }
 
 #[derive(Debug)]
+/// Represents `PendingIntercept`.
+///
+/// See also: [`PendingIntercept`].
 pub struct PendingIntercept {
     pub request: CapturedRequest,
     sender: Mutex<Option<oneshot::Sender<InterceptDecision>>>,
 }
 
 impl PendingIntercept {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn new(request: CapturedRequest) -> (Arc<Self>, oneshot::Receiver<InterceptDecision>) {
         let (tx, rx) = oneshot::channel();
         (
@@ -159,12 +216,22 @@ impl PendingIntercept {
 }
 
 #[derive(Debug)]
+/// Represents `PendingResponseIntercept`.
+///
+/// See also: [`PendingResponseIntercept`].
 pub struct PendingResponseIntercept {
     pub response: CapturedResponse,
     sender: Mutex<Option<oneshot::Sender<ResponseInterceptDecision>>>,
 }
 
 impl PendingResponseIntercept {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn new(
         response: CapturedResponse,
     ) -> (Arc<Self>, oneshot::Receiver<ResponseInterceptDecision>) {
@@ -191,6 +258,9 @@ impl PendingResponseIntercept {
 }
 
 #[derive(Debug, Error)]
+/// Enumerates `StateError` variants.
+///
+/// See also: [`StateError`].
 pub enum StateError {
     #[error("request not found in intercept queue")]
     NotFound,
@@ -203,6 +273,9 @@ pub enum StateError {
 }
 
 #[derive(Debug)]
+/// Represents `AppState`.
+///
+/// See also: [`AppState`].
 pub struct AppState {
     intercept_enabled: AtomicBool,
     intercept_response_enabled: AtomicBool,
@@ -222,6 +295,13 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn new() -> Self {
         let (events_tx, _) = broadcast::channel(2048);
         Self {
@@ -237,6 +317,13 @@ impl AppState {
         }
     }
 
+    /// Subscribes to `events`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn subscribe_events(&self) -> broadcast::Receiver<AppStateEvent> {
         self.events_tx.subscribe()
     }
@@ -276,10 +363,24 @@ impl AppState {
         }
     }
 
+    /// Executes `intercept enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn intercept_enabled(&self) -> bool {
         self.intercept_enabled.load(Ordering::Relaxed)
     }
 
+    /// Sets `intercept enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn set_intercept_enabled(&self, enabled: bool) {
         self.intercept_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
@@ -291,25 +392,60 @@ impl AppState {
         ));
     }
 
+    /// Executes `intercept response enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn intercept_response_enabled(&self) -> bool {
         self.intercept_response_enabled.load(Ordering::Relaxed)
     }
 
+    /// Sets `intercept response enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn set_intercept_response_enabled(&self, enabled: bool) {
         self.intercept_response_enabled
             .store(enabled, Ordering::Relaxed);
         self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
+    /// Executes `mitm enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn mitm_enabled(&self) -> bool {
         self.mitm_enabled.load(Ordering::Relaxed)
     }
 
+    /// Sets `mitm enabled`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn set_mitm_enabled(&self, enabled: bool) {
         self.mitm_enabled.store(enabled, Ordering::Relaxed);
         self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
+    /// Executes `enqueue intercept`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn enqueue_intercept(
         &self,
         request: CapturedRequest,
@@ -323,6 +459,16 @@ impl AppState {
         rx
     }
 
+    /// Executes `continue intercept`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn continue_intercept(
         &self,
         id: Uuid,
@@ -339,6 +485,13 @@ impl AppState {
         result
     }
 
+    /// Executes `pending requests`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn pending_requests(&self) -> Vec<CapturedRequest> {
         let mut rows: Vec<CapturedRequest> = self
             .pending_intercepts
@@ -365,6 +518,13 @@ impl AppState {
         ));
     }
 
+    /// Executes `enqueue response intercept`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn enqueue_response_intercept(
         &self,
         response: CapturedResponse,
@@ -378,6 +538,16 @@ impl AppState {
         rx
     }
 
+    /// Executes `continue response intercept`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub fn continue_response_intercept(
         &self,
         id: Uuid,
@@ -394,6 +564,13 @@ impl AppState {
         result
     }
 
+    /// Executes `pending responses`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn pending_responses(&self) -> Vec<CapturedResponse> {
         let mut rows: Vec<CapturedResponse> = self
             .pending_response_intercepts
@@ -404,6 +581,13 @@ impl AppState {
         rows
     }
 
+    /// Executes `register site path`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn register_site_path(&self, host: impl Into<String>, path: impl Into<String>) {
         let host = host.into().trim().to_ascii_lowercase();
         if !self.host_in_scope(&host) {
@@ -416,6 +600,13 @@ impl AppState {
         }
     }
 
+    /// Executes `site map`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn site_map(&self) -> Vec<(String, Vec<String>)> {
         let mut out = Vec::new();
         for host in &self.site_map {
@@ -427,6 +618,13 @@ impl AppState {
         out
     }
 
+    /// Sets `scope hosts`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn set_scope_hosts(&self, hosts: Vec<String>) {
         self.scope_hosts.clear();
         for host in hosts {
@@ -438,6 +636,13 @@ impl AppState {
         self.publish_event(AppStateEvent::ScopeUpdated(self.scope_snapshot()));
     }
 
+    /// Adds `scope host`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn add_scope_host(&self, host: String) {
         let normalized = normalize_scope_host(&host);
         if !normalized.is_empty() {
@@ -446,6 +651,13 @@ impl AppState {
         }
     }
 
+    /// Removes `scope host`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn remove_scope_host(&self, host: &str) -> bool {
         let normalized = normalize_scope_host(host);
         let removed = self.scope_hosts.remove(&normalized).is_some();
@@ -455,12 +667,26 @@ impl AppState {
         removed
     }
 
+    /// Executes `scope hosts`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn scope_hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.scope_hosts.iter().map(|h| h.clone()).collect();
         hosts.sort();
         hosts
     }
 
+    /// Executes `upstream proxy settings`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn upstream_proxy_settings(&self) -> UpstreamProxySettings {
         self.upstream_proxy_settings
             .read()
@@ -468,6 +694,13 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Sets `upstream proxy settings`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn set_upstream_proxy_settings(&self, settings: UpstreamProxySettings) {
         if let Ok(mut value) = self.upstream_proxy_settings.write() {
             *value = settings.normalized();

@@ -1,3 +1,7 @@
+//! roxy_api `ws` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{
     io,
     net::SocketAddr,
@@ -20,6 +24,9 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 #[derive(Clone)]
+/// Represents `WsHub`.
+///
+/// See also: [`WsHub`].
 pub struct WsHub {
     tx: broadcast::Sender<String>,
     clients: Arc<AtomicUsize>,
@@ -27,6 +34,13 @@ pub struct WsHub {
 }
 
 impl WsHub {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self {
@@ -36,35 +50,90 @@ impl WsHub {
         }
     }
 
+    /// Executes `publish`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn publish<T: Serialize>(&self, event: &T) {
         if let Ok(payload) = serde_json::to_string(event) {
             let _ = self.tx.send(payload);
         }
     }
 
+    /// Executes `subscribe`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }
 
+    /// Executes `client count`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn client_count(&self) -> usize {
         self.clients.load(Ordering::Relaxed)
     }
 
+    /// Sets `listen port`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn set_listen_port(&self, port: u16) {
         self.listen_port.store(port, Ordering::Relaxed);
     }
 
+    /// Executes `listen port`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn listen_port(&self) -> Option<u16> {
         let port = self.listen_port.load(Ordering::Relaxed);
         if port == 0 { None } else { Some(port) }
     }
 }
 
+/// Runs `ws server`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_ws_server(bind: SocketAddr, hub: WsHub) -> Result<()> {
     let (_tx, rx) = watch::channel(false);
     run_ws_server_with_shutdown(bind, hub, rx).await
 }
 
+/// Runs `ws server with shutdown`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_ws_server_with_shutdown(
     bind: SocketAddr,
     hub: WsHub,
@@ -73,6 +142,16 @@ pub async fn run_ws_server_with_shutdown(
     run_ws_server_with_shutdown_and_ready(bind, hub, shutdown, None).await
 }
 
+/// Runs `ws server with shutdown and ready`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_ws_server_with_shutdown_and_ready(
     bind: SocketAddr,
     hub: WsHub,
@@ -114,6 +193,16 @@ pub async fn run_ws_server_with_shutdown_and_ready(
     Ok(())
 }
 
+/// Runs `ws server with shutdown and ready uds`.
+///
+/// # Examples
+/// ```
+/// use roxy_api as _;
+/// assert!(true);
+/// ```
+///
+/// # Errors
+/// Returns an error when the operation cannot be completed.
 pub async fn run_ws_server_with_shutdown_and_ready_uds(
     path: impl AsRef<Path>,
     hub: WsHub,

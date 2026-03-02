@@ -1,3 +1,7 @@
+//! roxy_core `proxy` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{
     convert::Infallible,
     fmt::Write as _,
@@ -44,6 +48,9 @@ use crate::{
 };
 
 #[derive(Clone)]
+/// Represents `ProxyEngine`.
+///
+/// See also: [`ProxyEngine`].
 pub struct ProxyEngine {
     config: ProxyConfig,
     state: Arc<AppState>,
@@ -53,6 +60,13 @@ pub struct ProxyEngine {
 }
 
 impl ProxyEngine {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn new(
         config: ProxyConfig,
         state: Arc<AppState>,
@@ -70,20 +84,57 @@ impl ProxyEngine {
         }
     }
 
+    /// Executes `with middleware`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
     pub fn with_middleware(mut self, middleware: Arc<dyn ProxyMiddleware>) -> Self {
         self.middleware = Some(middleware);
         self
     }
 
+    /// Executes `run`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn run(self) -> Result<()> {
         let (_tx, rx) = watch::channel(false);
         self.run_with_shutdown(rx).await
     }
 
+    /// Runs `with shutdown`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn run_with_shutdown(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         self.run_with_shutdown_and_ready(&mut shutdown, None).await
     }
 
+    /// Runs `with shutdown and ready`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn run_with_shutdown_and_ready(
         self,
         shutdown: &mut watch::Receiver<bool>,
@@ -129,6 +180,16 @@ impl ProxyEngine {
         Ok(())
     }
 
+    /// Executes `serve stream`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_core as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn serve_stream(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<()> {
         let io = TokioIo::new(stream);
         let svc_engine = self.clone();

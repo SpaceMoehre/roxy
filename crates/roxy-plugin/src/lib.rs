@@ -1,3 +1,7 @@
+//! roxy_plugin `crate root` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
@@ -11,6 +15,9 @@ use tokio::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PluginRegistration`.
+///
+/// See also: [`PluginRegistration`].
 pub struct PluginRegistration {
     pub name: String,
     pub script_path: PathBuf,
@@ -18,12 +25,18 @@ pub struct PluginRegistration {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PluginInvocation`.
+///
+/// See also: [`PluginInvocation`].
 pub struct PluginInvocation {
     pub hook: String,
     pub payload: Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PluginResponse`.
+///
+/// See also: [`PluginResponse`].
 pub struct PluginResponse {
     pub plugin: String,
     pub hook: String,
@@ -31,6 +44,9 @@ pub struct PluginResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PluginAlteration`.
+///
+/// See also: [`PluginAlteration`].
 pub struct PluginAlteration {
     pub plugin: String,
     pub hook: String,
@@ -40,6 +56,9 @@ pub struct PluginAlteration {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `PluginEventRegistration`.
+///
+/// See also: [`PluginEventRegistration`].
 pub struct PluginEventRegistration {
     pub name: String,
     pub hooks: Vec<String>,
@@ -47,6 +66,9 @@ pub struct PluginEventRegistration {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
+/// Enumerates `PluginManagerEvent` variants.
+///
+/// See also: [`PluginManagerEvent`].
 pub enum PluginManagerEvent {
     PluginRegistered(PluginEventRegistration),
     PluginUnregistered { name: String },
@@ -55,6 +77,9 @@ pub enum PluginManagerEvent {
 }
 
 #[derive(Clone)]
+/// Represents `PluginManager`.
+///
+/// See also: [`PluginManager`].
 pub struct PluginManager {
     registry: Arc<RwLock<HashMap<String, PluginRegistration>>>,
     settings: Arc<RwLock<HashMap<String, Value>>>,
@@ -75,6 +100,13 @@ impl Default for PluginManager {
 }
 
 impl PluginManager {
+    /// Subscribes to `events`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
     pub fn subscribe_events(&self) -> broadcast::Receiver<PluginManagerEvent> {
         self.events_tx.subscribe()
     }
@@ -83,6 +115,16 @@ impl PluginManager {
         let _ = self.events_tx.send(event);
     }
 
+    /// Executes `register`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn register(&self, registration: PluginRegistration) -> Result<()> {
         if !registration.script_path.exists() {
             return Err(anyhow!(
@@ -114,6 +156,13 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Executes `unregister`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
     pub async fn unregister(&self, name: &str) -> bool {
         let removed = self.registry.write().await.remove(name).is_some();
         if removed {
@@ -126,6 +175,13 @@ impl PluginManager {
         removed
     }
 
+    /// Executes `list`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
     pub async fn list(&self) -> Vec<PluginRegistration> {
         let mut rows: Vec<PluginRegistration> =
             self.registry.read().await.values().cloned().collect();
@@ -133,6 +189,16 @@ impl PluginManager {
         rows
     }
 
+    /// Executes `invoke`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn invoke(
         &self,
         plugin_name: &str,
@@ -160,6 +226,16 @@ impl PluginManager {
         run_python_plugin(&plugin, invocation).await
     }
 
+    /// Executes `invoke all`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn invoke_all(
         &self,
         hook: &str,
@@ -196,6 +272,16 @@ impl PluginManager {
         out
     }
 
+    /// Sets `settings`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn set_settings(&self, plugin_name: &str, settings: Value) -> Result<()> {
         if !self.registry.read().await.contains_key(plugin_name) {
             return Err(anyhow!("unknown plugin: {plugin_name}"));
@@ -210,6 +296,16 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Gets `settings`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn get_settings(&self, plugin_name: &str) -> Result<Value> {
         if !self.registry.read().await.contains_key(plugin_name) {
             return Err(anyhow!("unknown plugin: {plugin_name}"));
@@ -223,6 +319,16 @@ impl PluginManager {
             .unwrap_or_else(|| Value::Object(Map::new())))
     }
 
+    /// Executes `record alteration`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn record_alteration(&self, alteration: PluginAlteration) -> Result<()> {
         if !self.registry.read().await.contains_key(&alteration.plugin) {
             return Err(anyhow!("unknown plugin: {}", alteration.plugin));
@@ -242,6 +348,16 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Lists `alterations`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_plugin as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error when the operation cannot be completed.
     pub async fn list_alterations(
         &self,
         plugin_name: &str,

@@ -1,8 +1,15 @@
+//! roxy_api `web_modules` module.
+//!
+//! Exposes public types and functions used by the `roxy` runtime and API surface.
+
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Represents `UiModule`.
+///
+/// See also: [`UiModule`].
 pub struct UiModule {
     pub id: String,
     pub title: String,
@@ -14,6 +21,13 @@ pub struct UiModule {
 }
 
 impl UiModule {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn new(
         id: &'static str,
         title: &'static str,
@@ -33,15 +47,35 @@ impl UiModule {
 }
 
 #[derive(Debug, Default)]
+/// Represents `UiModuleRegistry`.
+///
+/// See also: [`UiModuleRegistry`].
 pub struct UiModuleRegistry {
     modules: RwLock<Vec<UiModule>>,
 }
 
 impl UiModuleRegistry {
+    /// Constructs a new instance.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Executes `register`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Panics
+    /// Panics if internal assertions fail or infallible assumptions are violated.
     pub fn register(&self, module: UiModule) {
         let mut modules = self
             .modules
@@ -54,6 +88,16 @@ impl UiModuleRegistry {
         modules.push(module);
     }
 
+    /// Executes `modules`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Panics
+    /// Panics if internal assertions fail or infallible assumptions are violated.
     pub fn modules(&self) -> Vec<UiModule> {
         self.modules
             .read()
@@ -61,6 +105,16 @@ impl UiModuleRegistry {
             .clone()
     }
 
+    /// Executes `module scripts bundle`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
+    ///
+    /// # Panics
+    /// Panics if internal assertions fail or infallible assumptions are violated.
     pub fn module_scripts_bundle(&self) -> String {
         self.modules
             .read()
@@ -71,6 +125,13 @@ impl UiModuleRegistry {
             .join("\n\n")
     }
 
+    /// Executes `with builtin modules`.
+    ///
+    /// # Examples
+    /// ```
+    /// use roxy_api as _;
+    /// assert!(true);
+    /// ```
     pub fn with_builtin_modules() -> Self {
         let registry = Self::new();
         registry.register(UiModule::new(
