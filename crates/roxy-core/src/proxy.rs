@@ -16,7 +16,10 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use boring::{
     pkey::PKey,
-    ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode},
+    ssl::{
+        CertificateCompressionAlgorithm, CertificateCompressor, SslAcceptor, SslConnector,
+        SslMethod, SslVerifyMode, SslVersion,
+    },
     x509::X509,
 };
 use bytes::Bytes;
@@ -27,7 +30,7 @@ use hyper::{
     header::{HOST, HeaderName, HeaderValue},
     service::service_fn,
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
@@ -321,6 +324,12 @@ impl ProxyEngine {
         let mut tls_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
             .context("failed building downstream TLS acceptor")?;
         tls_builder
+            .set_min_proto_version(Some(SslVersion::TLS1_2))
+            .context("failed setting downstream TLS minimum protocol version")?;
+        tls_builder
+            .set_max_proto_version(Some(SslVersion::TLS1_3))
+            .context("failed setting downstream TLS maximum protocol version")?;
+        tls_builder
             .set_certificate(&cert)
             .context("failed assigning downstream certificate")?;
         tls_builder
@@ -489,17 +498,25 @@ impl ProxyEngine {
                         }
                     }
                 };
+                let use_h2 = tls_stream.ssl().selected_alpn_protocol() == Some(b"h2");
                 debug!(
                     request_id = %request_id,
                     %host,
                     ech_accepted = tls_stream.ssl().ech_accepted(),
+                    selected_alpn = ?tls_stream.ssl().selected_alpn_protocol(),
                     "upstream TLS handshake completed"
                 );
-                return send_http_request_over_stream(tls_stream, parsed_request, &uri, &authority)
-                    .await;
+                return send_http_request_over_stream(
+                    tls_stream,
+                    parsed_request,
+                    &uri,
+                    &authority,
+                    use_h2,
+                )
+                .await;
             }
 
-            send_http_request_over_stream(stream, parsed_request, &uri, &authority).await
+            send_http_request_over_stream(stream, parsed_request, &uri, &authority, false).await
         })
         .await
         .with_context(|| {
@@ -985,6 +1002,7 @@ async fn send_http_request_over_stream<S>(
     parsed_request: &crate::raw_http::ParsedRequestBlob,
     uri: &http::Uri,
     authority: &str,
+    use_h2: bool,
 ) -> Result<(StatusCode, http::HeaderMap, Bytes)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1036,6 +1054,33 @@ where
         );
     }
 
+    if use_h2 {
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake(TokioIo::new(stream))
+                .await
+                .context("failed opening upstream HTTP/2 client connection")?;
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                trace!(%err, "upstream HTTP/2 client connection closed with error");
+            }
+        });
+
+        let response = sender
+            .send_request(request)
+            .await
+            .context("failed sending HTTP/2 request to upstream")?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .context("failed reading upstream HTTP/2 response body")?
+            .to_bytes();
+        return Ok((status, headers, body));
+    }
+
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .context("failed opening upstream HTTP/1.1 client connection")?;
@@ -1077,13 +1122,66 @@ fn upstream_tls_connector() -> Arc<SslConnector> {
         .get_or_init(|| {
             let mut builder = SslConnector::builder(SslMethod::tls_client())
                 .expect("failed building upstream boring TLS connector");
+            builder
+                .set_min_proto_version(Some(SslVersion::TLS1_2))
+                .expect("failed setting upstream TLS minimum protocol version");
+            builder
+                .set_max_proto_version(Some(SslVersion::TLS1_3))
+                .expect("failed setting upstream TLS maximum protocol version");
+            if let Err(err) = builder.set_curves_list("X25519MLKEM768") {
+                warn!(
+                    %err,
+                    "upstream does not support X25519MLKEM768 in this BoringSSL build; falling back to X25519"
+                );
+                builder
+                    .set_curves_list("X25519")
+                    .expect("failed setting upstream TLS fallback key exchange groups");
+            }
+            builder
+                .set_sigalgs_list("ecdsa_secp256r1_sha256")
+                .expect("failed setting upstream TLS signature algorithms");
+            builder.enable_signed_cert_timestamps();
+            if let Err(err) = builder.add_certificate_compression_algorithm(BrotliCertCompression)
+            {
+                warn!(
+                    %err,
+                    "failed enabling TLS certificate compression extension for upstream client"
+                );
+            }
+            builder.set_permute_extensions(false);
             builder.set_verify(SslVerifyMode::PEER);
             builder
-                .set_alpn_protos(b"\x08http/1.1")
+                .set_alpn_protos(b"\x02h2\x08http/1.1")
                 .expect("failed configuring upstream boring ALPN protocol list");
             Arc::new(builder.build())
         })
         .clone()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BrotliCertCompression;
+
+impl CertificateCompressor for BrotliCertCompression {
+    const ALGORITHM: CertificateCompressionAlgorithm = CertificateCompressionAlgorithm::BROTLI;
+    const CAN_COMPRESS: bool = false;
+    const CAN_DECOMPRESS: bool = true;
+
+    fn compress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "certificate compression is not used on client-side sends",
+        ))
+    }
+
+    fn decompress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
+    where
+        W: io::Write,
+    {
+        brotli::BrotliDecompress(&mut io::Cursor::new(input), output)
+    }
 }
 
 fn hash_seed(input: &[u8]) -> u64 {
