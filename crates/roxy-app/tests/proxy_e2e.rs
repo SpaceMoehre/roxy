@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    fs,
     net::TcpListener as StdTcpListener,
     process::{Child, Command, Stdio},
     sync::{
@@ -8,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::{Client, Proxy};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
@@ -33,6 +35,260 @@ impl Drop for ChildGuard {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[derive(Clone)]
+struct Proxy {
+    url: String,
+}
+
+impl Proxy {
+    fn all(url: String) -> Result<Self, String> {
+        if url.trim().is_empty() {
+            return Err("proxy url cannot be empty".to_string());
+        }
+        Ok(Self { url })
+    }
+}
+
+#[derive(Clone)]
+struct Client {
+    insecure: bool,
+    timeout: Duration,
+    proxy: Option<String>,
+}
+
+impl Client {
+    fn builder() -> ClientBuilder {
+        ClientBuilder {
+            insecure: false,
+            timeout: Duration::from_secs(30),
+            proxy: None,
+        }
+    }
+
+    fn get(&self, url: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(self.clone(), "GET", url.into())
+    }
+
+    fn post(&self, url: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(self.clone(), "POST", url.into())
+    }
+
+    fn put(&self, url: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(self.clone(), "PUT", url.into())
+    }
+}
+
+struct ClientBuilder {
+    insecure: bool,
+    timeout: Duration,
+    proxy: Option<String>,
+}
+
+impl ClientBuilder {
+    fn danger_accept_invalid_certs(mut self, insecure: bool) -> Self {
+        self.insecure = insecure;
+        self
+    }
+
+    fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxy = Some(proxy.url);
+        self
+    }
+
+    fn build(self) -> Result<Client, String> {
+        Ok(Client {
+            insecure: self.insecure,
+            timeout: self.timeout,
+            proxy: self.proxy,
+        })
+    }
+}
+
+struct RequestBuilder {
+    client: Client,
+    method: &'static str,
+    url: String,
+    json_body: Option<String>,
+    headers: Vec<(String, String)>,
+}
+
+impl RequestBuilder {
+    fn new(client: Client, method: &'static str, url: String) -> Self {
+        Self {
+            client,
+            method,
+            url,
+            json_body: None,
+            headers: Vec::new(),
+        }
+    }
+
+    fn json(mut self, value: &Value) -> Self {
+        self.json_body = Some(value.to_string());
+        self
+    }
+
+    fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    async fn send(self) -> Result<Response, String> {
+        tokio::task::spawn_blocking(move || execute_curl(self))
+            .await
+            .map_err(|err| format!("curl task join error: {err}"))?
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StatusCode(u16);
+
+impl StatusCode {
+    fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    fn is_success(self) -> bool {
+        (200..300).contains(&self.0)
+    }
+}
+
+impl std::fmt::Display for StatusCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Default)]
+struct Headers(BTreeMap<String, String>);
+
+impl Headers {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(&name.to_ascii_lowercase()).map(String::as_str)
+    }
+}
+
+struct Response {
+    status: StatusCode,
+    headers: Headers,
+    body: Vec<u8>,
+}
+
+impl Response {
+    fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    fn headers(&self) -> &Headers {
+        &self.headers
+    }
+
+    async fn text(self) -> Result<String, String> {
+        String::from_utf8(self.body).map_err(|err| format!("response is not utf-8: {err}"))
+    }
+
+    async fn json<T: DeserializeOwned>(self) -> Result<T, String> {
+        serde_json::from_slice(&self.body).map_err(|err| format!("invalid json response: {err}"))
+    }
+}
+
+fn execute_curl(request: RequestBuilder) -> Result<Response, String> {
+    let headers_file = tempfile::NamedTempFile::new()
+        .map_err(|err| format!("failed creating temp headers file: {err}"))?;
+    let mut command = Command::new("curl");
+    command.arg("-sS");
+    command.arg("-X").arg(request.method);
+    command
+        .arg("--max-time")
+        .arg(request.client.timeout.as_secs().max(1).to_string());
+    if request.client.insecure {
+        command.arg("-k");
+    }
+    if let Some(proxy) = request.client.proxy {
+        command.arg("-x").arg(proxy);
+    }
+    let mut has_content_type = false;
+    for (name, value) in &request.headers {
+        if name.eq_ignore_ascii_case("content-type") {
+            has_content_type = true;
+        }
+        command.arg("-H").arg(format!("{name}: {value}"));
+    }
+    if let Some(body) = request.json_body {
+        if !has_content_type {
+            command.arg("-H").arg("content-type: application/json");
+        }
+        command.arg("--data-binary").arg(body);
+    }
+    command.arg("-D").arg(headers_file.path());
+    command.arg("-w").arg("\n__ROXY_STATUS__:%{http_code}");
+    command.arg(&request.url);
+
+    let output = command
+        .output()
+        .map_err(|err| format!("failed executing curl: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl failed: {}", stderr.trim()));
+    }
+
+    let marker = b"\n__ROXY_STATUS__:";
+    let Some(marker_idx) = output
+        .stdout
+        .windows(marker.len())
+        .rposition(|chunk| chunk == marker)
+    else {
+        return Err("curl output missing status marker".to_string());
+    };
+
+    let body = output.stdout[..marker_idx].to_vec();
+    let status_raw = String::from_utf8_lossy(&output.stdout[marker_idx + marker.len()..]);
+    let status_code = status_raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|err| format!("invalid curl status code '{status_raw}': {err}"))?;
+    let headers = parse_headers(headers_file.path())?;
+
+    Ok(Response {
+        status: StatusCode(status_code),
+        headers,
+        body,
+    })
+}
+
+fn parse_headers(path: &std::path::Path) -> Result<Headers, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed reading curl header dump {}: {err}", path.display()))?;
+    let mut last = BTreeMap::new();
+    let mut current = BTreeMap::new();
+    let mut in_block = false;
+
+    for line in raw.replace("\r\n", "\n").lines() {
+        if line.starts_with("HTTP/") {
+            current.clear();
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if line.is_empty() {
+            if !current.is_empty() {
+                last = current.clone();
+            }
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            current.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    if !current.is_empty() {
+        last = current;
+    }
+    Ok(Headers(last))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

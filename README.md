@@ -9,8 +9,8 @@ High-performance, async-first HTTP(S) interception proxy for security testing wo
 | Area | Implementation |
 |---|---|
 | Runtime | `tokio` |
-| Proxy Core | `hyper` + `reqwest` |
-| HTTPS MITM | `tokio-rustls` + on-the-fly cert generation |
+| Proxy Core | `hyper` + `tokio-boring` |
+| HTTPS MITM | `tokio-boring` + on-the-fly cert generation |
 | Web/API Server | `ntex` |
 | Realtime Events | `tokio-tungstenite` |
 | Persistence | `sled` (raw exchange store) + `tantivy` (full-text search) |
@@ -112,6 +112,9 @@ Notes:
 | `ROXY_DEBUG_LOGGING` | `false` | Enables extensive proxy debug logs |
 | `ROXY_DEBUG_LOG_BODIES` | `false` | Includes request/response body previews in debug logs |
 | `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes logged per body preview |
+| `ROXY_ECH_ENABLED` | `true` | Enables ECH behavior for outbound TLS clients |
+| `ROXY_ECH_GREASE` | `true` | Sends ECH GREASE when true |
+| `ROXY_ECH_CONFIG_LIST_BASE64` | _unset_ | Optional base64-encoded `ECHConfigList` override (otherwise resolved automatically per domain via DNS HTTPS records) |
 
 Debugging example:
 
@@ -242,7 +245,6 @@ Implemented now:
 
 Planned next milestones:
 
-- Optional `boring`-based upstream TLS path behind feature flags.
 - More advanced intruder payload templating/marking workflows.
 - Expanded auth/RBAC and multi-tenant API controls.
 

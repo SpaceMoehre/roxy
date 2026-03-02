@@ -25,24 +25,22 @@ http = "1.2"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+hickory-resolver = "0.24.4"
 ntex = { version = "2.16", features = ["tokio"] }
 rcgen = "0.13"
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
-rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sled = "0.34"
 tantivy = "0.22"
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["full"] }
-tokio-rustls = "0.26"
+tokio-boring = "4.17"
 tokio-tungstenite = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tera = "1.20"
 uuid = { version = "1.16", features = ["serde", "v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 tempfile = "3.19"
 url = "2.5"
 zstd = "0.13"
-webpki-roots = "0.26"
+boring = "4.21"

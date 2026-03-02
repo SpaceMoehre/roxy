@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, broadcast},
@@ -20,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     model::now_unix_ms,
+    outbound::send_parsed_request,
     raw_http::{ParsedRequestBlob, parse_request_blob},
 };
 
@@ -310,11 +310,7 @@ impl IntruderManager {
         spec: IntruderJobSpec,
         payload_vectors: Vec<BTreeMap<String, String>>,
     ) -> Result<()> {
-        let client = Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_millis(spec.timeout_ms.unwrap_or(15_000)))
-            .build()
-            .context("failed building intruder client")?;
+        let timeout = Duration::from_millis(spec.timeout_ms.unwrap_or(15_000));
 
         {
             let mut guard = state.write().await;
@@ -331,10 +327,9 @@ impl IntruderManager {
         for (sequence, payloads) in payload_vectors.into_iter().enumerate() {
             let payloads_cloned = payloads.clone();
             let request = build_attack_request(&spec, payloads)?;
-            let client = client.clone();
 
             join_set.spawn(async move {
-                execute_attack(client, sequence, payloads_cloned, request).await
+                execute_attack(sequence, payloads_cloned, request, timeout).await
             });
 
             if join_set.len() >= concurrency {
@@ -489,30 +484,22 @@ fn infer_default_scheme_from_request_blob(request_blob: &str) -> Option<&'static
 }
 
 async fn execute_attack(
-    client: Client,
     sequence: usize,
     payloads: BTreeMap<String, String>,
     request: PreparedRequest,
+    timeout: Duration,
 ) -> IntruderResult {
     let started = std::time::Instant::now();
-    let method = request.parsed.method.parse::<reqwest::Method>();
     let request_blob = request.request_blob;
+    let parsed_request = request.parsed;
 
     let response = async {
-        let method = method.context("invalid HTTP method")?;
-        let mut builder = client.request(method, request.parsed.uri.clone());
-        for h in request.parsed.headers {
-            builder = builder.header(h.name, h.value);
-        }
-
-        let resp = builder
-            .body(request.parsed.body)
-            .send()
+        let resp = send_parsed_request(parsed_request, timeout, true)
             .await
             .context("request failed")?;
-        let status = resp.status().as_u16();
+        let status = resp.status.as_u16();
         let mut headers_text = String::new();
-        for (name, value) in resp.headers() {
+        for (name, value) in &resp.headers {
             if let Ok(v) = value.to_str() {
                 headers_text.push_str(name.as_str());
                 headers_text.push_str(": ");
@@ -520,7 +507,7 @@ async fn execute_attack(
                 headers_text.push_str("\r\n");
             }
         }
-        let bytes = resp.bytes().await.context("response read failed")?;
+        let bytes = resp.body;
         let body_text = String::from_utf8_lossy(&bytes);
         let response_blob = format!("HTTP/1.1 {status}\r\n{headers_text}\r\n{body_text}");
         Ok::<(u16, usize, String), anyhow::Error>((status, bytes.len(), response_blob))

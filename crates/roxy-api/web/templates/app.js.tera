@@ -1436,8 +1436,9 @@ function handleRealtimeEvent(message) {
   if (!event || typeof event.event !== 'string') {
     return;
   }
+  const eventName = event.event.trim().toLowerCase();
 
-  switch (event.event) {
+  switch (eventName) {
     case 'exchange':
       applyExchangeEvent(event.payload);
       break;

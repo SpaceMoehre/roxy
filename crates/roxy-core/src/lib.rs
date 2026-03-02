@@ -3,9 +3,11 @@ pub mod config;
 pub mod intruder;
 pub mod middleware;
 pub mod model;
+pub mod outbound;
 pub mod proxy;
 pub mod raw_http;
 pub mod state;
+mod tls_ech;
 
 pub use cert::{CaCertificate, CertManager, DomainCertificate};
 pub use config::{DebugLoggingConfig, ProxyConfig};
@@ -18,6 +20,7 @@ pub use model::{
     CapturedExchange, CapturedRequest, CapturedResponse, EventEnvelope, HeaderValuePair,
     RequestMutation, ResponseMutation,
 };
+pub use outbound::{OutboundResponse, send_parsed_request};
 pub use proxy::ProxyEngine;
 pub use raw_http::{ParsedRequestBlob, build_request_blob, parse_request_blob};
 pub use state::{

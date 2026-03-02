@@ -11,6 +11,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -18,10 +19,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use ntex::web::{self, HttpResponse};
 use roxy_core::{
-    AppState, CertManager, InterceptDecision, IntruderJobSpec, IntruderManager, RequestMutation,
-    ResponseInterceptDecision, ResponseMutation, UpstreamProxySettings,
+    AppState, CertManager, InterceptDecision, IntruderJobSpec, IntruderManager, ParsedRequestBlob,
+    RequestMutation, ResponseInterceptDecision, ResponseMutation, UpstreamProxySettings,
     model::{HeaderValuePair, now_unix_ms},
-    parse_request_blob,
+    parse_request_blob, send_parsed_request,
 };
 use roxy_plugin::{PluginInvocation, PluginManager, PluginRegistration};
 use roxy_storage::StorageManager;
@@ -997,11 +998,6 @@ async fn repeater_send(
 }
 
 async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("failed creating repeater client")?;
-
     let raw_blob = STANDARD
         .decode(&req.request_blob_base64)
         .context("invalid request_blob_base64")?;
@@ -1012,28 +1008,13 @@ async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
     )
     .context("invalid request blob")?;
 
-    let mut builder = client.request(parsed.method.parse()?, &parsed.uri);
-    for header in &parsed.headers {
-        if header.name.eq_ignore_ascii_case("host")
-            || header.name.eq_ignore_ascii_case("content-length")
-        {
-            continue;
-        }
-        builder = builder.header(&header.name, &header.value);
-    }
-
-    let response = builder
-        .body(parsed.body)
-        .send()
+    let response = send_parsed_request(parsed, Duration::from_secs(30), true)
         .await
         .context("repeater request failed")?;
-    let status = response.status().as_u16();
-    let headers_map = response.headers().clone();
+    let status = response.status.as_u16();
+    let headers_map = response.headers;
     let content_encoding = content_encoding_from_headers(&headers_map);
-    let encoded_body_bytes = response
-        .bytes()
-        .await
-        .context("failed reading repeater response")?;
+    let encoded_body_bytes = response.body;
     let mut response_decoded = false;
     let body_bytes =
         match decode_http_body_bytes(encoded_body_bytes.as_ref(), content_encoding.as_deref()) {
@@ -1047,7 +1028,7 @@ async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
                     encoding = ?content_encoding,
                     "failed decoding repeater response body; preserving original bytes"
                 );
-                encoded_body_bytes.to_vec()
+                encoded_body_bytes.clone().to_vec()
             }
         };
 
@@ -1075,9 +1056,9 @@ async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
     })
 }
 
-fn content_encoding_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+fn content_encoding_from_headers(headers: &http::HeaderMap) -> Option<String> {
     headers
-        .get(reqwest::header::CONTENT_ENCODING)
+        .get(http::header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -1270,52 +1251,44 @@ async fn intruder_fetch_payload_source(
     req: web::types::Json<IntruderPayloadSourceFetchRequest>,
 ) -> HttpResponse {
     let url = req.url.trim();
-    let parsed_url = match reqwest::Url::parse(url) {
-        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
-        Ok(_) => {
-            return json_error(
-                HttpResponse::BadRequest(),
-                "payload source url must use http or https",
-            );
-        }
+    let uri = match url.parse::<http::Uri>() {
+        Ok(uri) => uri,
         Err(err) => return json_error(HttpResponse::BadRequest(), &format!("invalid url: {err}")),
     };
-
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            return json_error(
-                HttpResponse::InternalServerError(),
-                &format!("failed to create fetch client: {err}"),
-            );
-        }
+    let scheme = uri.scheme_str().unwrap_or_default();
+    if scheme != "http" && scheme != "https" {
+        return json_error(
+            HttpResponse::BadRequest(),
+            "payload source url must use http or https",
+        );
+    }
+    let Some(host) = uri.host() else {
+        return json_error(
+            HttpResponse::BadRequest(),
+            "payload source url is missing host",
+        );
     };
 
-    let response = match client.get(parsed_url).send().await {
+    let parsed_request = ParsedRequestBlob {
+        method: "GET".to_string(),
+        uri: url.to_string(),
+        host: host.to_string(),
+        headers: Vec::new(),
+        body: Bytes::new(),
+    };
+
+    let response = match send_parsed_request(parsed_request, Duration::from_secs(20), true).await {
         Ok(response) => response,
         Err(err) => return json_error(HttpResponse::BadGateway(), &format!("fetch failed: {err}")),
     };
 
-    if !response.status().is_success() {
+    if !response.status.is_success() {
         return json_error(
             HttpResponse::BadGateway(),
-            &format!("source returned HTTP {}", response.status()),
+            &format!("source returned HTTP {}", response.status),
         );
     }
-
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return json_error(
-                HttpResponse::BadGateway(),
-                &format!("failed reading source response: {err}"),
-            );
-        }
-    };
+    let bytes = response.body;
 
     const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
     if bytes.len() > MAX_SOURCE_BYTES {

@@ -8,12 +8,17 @@ use std::{
     io,
     io::Read,
     net::SocketAddr,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::{Arc, Once, OnceLock},
+    net::{Ipv4Addr, Ipv6Addr},
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
+use boring::{
+    pkey::PKey,
+    ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode},
+    x509::X509,
+};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -28,7 +33,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_boring::{accept as tls_accept, connect as tls_connect};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -45,6 +50,7 @@ use crate::{
         AppState, InterceptDecision, ResponseInterceptDecision, UpstreamChainMode,
         UpstreamProxyEntry, UpstreamProxyProtocol, UpstreamProxySettings,
     },
+    tls_ech::{apply_ech_client_config, ech_retry_from_handshake_error},
 };
 
 #[derive(Clone)]
@@ -73,8 +79,6 @@ impl ProxyEngine {
         cert_manager: Arc<CertManager>,
         event_tx: mpsc::Sender<EventEnvelope>,
     ) -> Self {
-        ensure_rustls_crypto_provider();
-
         Self {
             config,
             state,
@@ -310,22 +314,29 @@ impl ProxyEngine {
             .await
             .with_context(|| format!("failed creating domain certificate for {domain}"))?;
 
-        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(leaf.key_der),
-        );
-        let certs = vec![rustls::pki_types::CertificateDer::from(leaf.cert_der)];
+        let cert = X509::from_der(&leaf.cert_der)
+            .context("failed parsing generated leaf certificate for boring TLS")?;
+        let key = PKey::private_key_from_der(&leaf.key_der)
+            .context("failed parsing generated leaf private key for boring TLS")?;
+        let mut tls_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
+            .context("failed building downstream TLS acceptor")?;
+        tls_builder
+            .set_certificate(&cert)
+            .context("failed assigning downstream certificate")?;
+        tls_builder
+            .set_private_key(&key)
+            .context("failed assigning downstream private key")?;
+        tls_builder
+            .check_private_key()
+            .context("downstream certificate/private key mismatch")?;
+        tls_builder
+            .set_alpn_protos(b"\x08http/1.1")
+            .context("failed configuring downstream ALPN protocol list")?;
 
-        let mut tls_server = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .context("failed building downstream TLS server config")?;
-        tls_server.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-        let acceptor = TlsAcceptor::from(Arc::new(tls_server));
-        let tls_stream = acceptor
-            .accept(upgraded)
+        let acceptor = tls_builder.build();
+        let tls_stream = tls_accept(&acceptor, upgraded)
             .await
-            .context("TLS handshake with downstream client failed")?;
+            .map_err(|err| anyhow!("TLS handshake with downstream client failed: {err}"))?;
 
         let authority = Arc::new(authority);
         let engine = Arc::new(self.clone());
@@ -431,12 +442,59 @@ impl ProxyEngine {
                 let host = uri
                     .host()
                     .ok_or_else(|| anyhow!("request URI missing host"))?;
-                let connector = TlsConnector::from(upstream_tls_client_config());
-                let server_name = tls_server_name_for_host(host)?;
-                let tls_stream = connector
-                    .connect(server_name, stream)
-                    .await
-                    .with_context(|| format!("TLS handshake to upstream host '{host}' failed"))?;
+                let connector = upstream_tls_connector();
+                let mut tls_config = connector
+                    .configure()
+                    .context("failed preparing upstream boring TLS connector")?;
+                apply_ech_client_config(&mut tls_config, host, None).await;
+
+                let tls_stream = match tls_connect(tls_config, host, stream).await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        if let Some(retry) = ech_retry_from_handshake_error(&err) {
+                            debug!(
+                                request_id = %request_id,
+                                %host,
+                                public_name_override = ?retry.public_name_override,
+                                "retrying upstream TLS handshake with ECH retry configs"
+                            );
+                            let retry_stream =
+                                dial_via_upstream_chain(&authority, &chain, settings.proxy_dns)
+                                    .await
+                                    .with_context(|| {
+                                        format!(
+                                            "failed reconnecting upstream chain for ECH retry authority={authority}"
+                                        )
+                                    })?;
+                            let mut retry_tls_config = connector.configure().context(
+                                "failed preparing upstream boring TLS connector for ECH retry",
+                            )?;
+                            apply_ech_client_config(
+                                &mut retry_tls_config,
+                                host,
+                                Some(retry.config_list.as_slice()),
+                            )
+                            .await;
+                            tls_connect(retry_tls_config, host, retry_stream)
+                                .await
+                                .map_err(|retry_err| {
+                                    anyhow!(
+                                        "TLS handshake to upstream host '{host}' failed after ECH retry: {retry_err}"
+                                    )
+                                })?
+                        } else {
+                            return Err(anyhow!(
+                                "TLS handshake to upstream host '{host}' failed: {err}"
+                            ));
+                        }
+                    }
+                };
+                debug!(
+                    request_id = %request_id,
+                    %host,
+                    ech_accepted = tls_stream.ssl().ech_accepted(),
+                    "upstream TLS handshake completed"
+                );
                 return send_http_request_over_stream(tls_stream, parsed_request, &uri, &authority)
                     .await;
             }
@@ -1013,26 +1071,17 @@ fn uri_authority_with_default_port(uri: &http::Uri) -> Result<String> {
     Ok(format_authority(host, port))
 }
 
-fn tls_server_name_for_host(host: &str) -> Result<rustls::pki_types::ServerName<'static>> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(rustls::pki_types::ServerName::IpAddress(ip.into()));
-    }
-    rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| anyhow!("invalid upstream DNS name '{host}'"))
-}
-
-fn upstream_tls_client_config() -> Arc<rustls::ClientConfig> {
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CONFIG
+fn upstream_tls_connector() -> Arc<SslConnector> {
+    static CONNECTOR: OnceLock<Arc<SslConnector>> = OnceLock::new();
+    CONNECTOR
         .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-            let mut config = rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Arc::new(config)
+            let mut builder = SslConnector::builder(SslMethod::tls_client())
+                .expect("failed building upstream boring TLS connector");
+            builder.set_verify(SslVerifyMode::PEER);
+            builder
+                .set_alpn_protos(b"\x08http/1.1")
+                .expect("failed configuring upstream boring ALPN protocol list");
+            Arc::new(builder.build())
         })
         .clone()
 }
@@ -1531,13 +1580,6 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     }
     addr.set_port(port + 1);
     Ok(addr)
-}
-
-fn ensure_rustls_crypto_provider() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 #[cfg(test)]

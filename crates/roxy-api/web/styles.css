@@ -640,12 +640,19 @@ button.warn {
 .proxy-history-layout {
   display: grid;
   gap: 8px;
-  grid-template-rows: minmax(122px, 1fr) minmax(160px, 1.5fr);
+  grid-template-rows: 240px minmax(160px, 1fr);
+}
+
+.proxy-history-upper {
+  min-height: 240px;
+  max-height: 240px;
+  overflow: hidden;
 }
 
 .proxy-history-upper .scroll-list {
-  max-height: none;
+  max-height: 100%;
   height: 100%;
+  overflow-y: auto;
 }
 
 .proxy-history-lower {
@@ -902,5 +909,14 @@ select:focus-visible,
   .settings-group-meta {
     margin-left: 0;
     width: 100%;
+  }
+
+  .proxy-history-layout {
+    grid-template-rows: 200px minmax(160px, 1fr);
+  }
+
+  .proxy-history-upper {
+    min-height: 200px;
+    max-height: 200px;
   }
 }
