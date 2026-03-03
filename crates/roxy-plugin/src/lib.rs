@@ -2,7 +2,11 @@
 //!
 //! Exposes public types and functions used by the `roxy` runtime and API surface.
 
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -279,8 +283,7 @@ impl PluginManager {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            let result =
-                run_python_plugin_streaming(&python, &plugin, invocation, line_tx).await;
+            let result = run_python_plugin_streaming(&python, &plugin, invocation, line_tx).await;
             let _ = result_tx.send(result);
         });
 
@@ -331,10 +334,13 @@ impl PluginManager {
                 settings,
             );
             let python = self.python_path.read().await.clone();
-            let response = timeout(timeout_per_plugin, run_python_plugin(&python, &plugin, invocation))
-                .await
-                .map_err(|_| anyhow!("plugin '{}' timed out", plugin.name))
-                .and_then(|r| r);
+            let response = timeout(
+                timeout_per_plugin,
+                run_python_plugin(&python, &plugin, invocation),
+            )
+            .await
+            .map_err(|_| anyhow!("plugin '{}' timed out", plugin.name))
+            .and_then(|r| r);
             out.push(response);
         }
 

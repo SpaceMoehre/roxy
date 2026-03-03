@@ -405,7 +405,10 @@ pub async fn run_api_with_shutdown_and_ready(
                                 web::get().to(list_plugin_alterations),
                             )
                             .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
-                            .route("/plugins/{id}/invoke-stream", web::post().to(invoke_plugin_stream))
+                            .route(
+                                "/plugins/{id}/invoke-stream",
+                                web::post().to(invoke_plugin_stream),
+                            )
                             .route(
                                 "/plugins/{id}/template/{file}",
                                 web::get().to(get_plugin_template),
@@ -563,7 +566,10 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                             web::get().to(list_plugin_alterations),
                         )
                         .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
-                        .route("/plugins/{id}/invoke-stream", web::post().to(invoke_plugin_stream))
+                        .route(
+                            "/plugins/{id}/invoke-stream",
+                            web::post().to(invoke_plugin_stream),
+                        )
                         .route(
                             "/plugins/{id}/template/{file}",
                             web::get().to(get_plugin_template),
@@ -1131,7 +1137,11 @@ async fn invoke_plugin_stream(
         payload: req.payload.clone(),
     };
 
-    let (mut line_rx, result_rx) = match state.plugins.invoke_streaming(&plugin_name, invocation).await {
+    let (mut line_rx, result_rx) = match state
+        .plugins
+        .invoke_streaming(&plugin_name, invocation)
+        .await
+    {
         Ok(pair) => pair,
         Err(err) => return json_error(HttpResponse::BadRequest(), &err.to_string()),
     };

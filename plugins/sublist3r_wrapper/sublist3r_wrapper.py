@@ -185,23 +185,47 @@ def _source_crtsh(domain: str) -> List[str]:
     return list(subdomains)
 
 
+# Engines known to be broken or unmaintained in the sublist3r package.
+_BROKEN_ENGINES = {"dnsdumpster"}
+
+# Default engine list with broken ones removed.
+_DEFAULT_ENGINES = "baidu,yahoo,google,bing,ask,netcraft,virustotal,threatcrowd,ssl,passivedns"
+
+
 def _source_full_sublist3r(domain: str, threads: int = 30,
                             engines: Optional[str] = None,
                             bruteforce: bool = False) -> List[str]:
     """Use the full Sublist3r tool, auto-installing it if necessary."""
     _ensure_packages("sublist3r", "requests", "dnspython")
+
+    # Default to the curated engine list that excludes broken scrapers.
+    if not engines:
+        engines = _DEFAULT_ENGINES
+
     try:
         import sublist3r  # type: ignore[import-untyped]
-        results = sublist3r.main(
-            domain,
-            threads,
-            None,       # savefile
-            ports=None,
-            silent=True,
-            verbose=False,
-            enable_bruteforce=bruteforce,
-            engines=engines,
-        )
+        import io, os
+
+        # Suppress sublist3r's internal multiprocessing stderr noise;
+        # we emit structured progress via _progress() instead.
+        devnull = open(os.devnull, "w")
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            results = sublist3r.main(
+                domain,
+                threads,
+                None,       # savefile
+                ports=None,
+                silent=True,
+                verbose=False,
+                enable_bruteforce=bruteforce,
+                engines=engines,
+            )
+        finally:
+            sys.stderr = old_stderr
+            devnull.close()
+
         if isinstance(results, (list, set)):
             return [str(s).strip().lower() for s in results if s]
     except Exception:

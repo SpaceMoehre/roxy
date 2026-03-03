@@ -286,14 +286,16 @@
 
       if (event.event === "plugin_stream_output") {
         // Parse the line — Python emits JSON with a "message" field.
-        let msg = payload.line || "";
+        const raw = payload.line || "";
         try {
-          const parsed = JSON.parse(msg);
-          msg = parsed.message || msg;
+          const parsed = JSON.parse(raw);
+          if (parsed.message) {
+            appendLiveOutput(container, parsed.message);
+          }
+          // Ignore JSON lines without a message (internal bookkeeping).
         } catch (_) {
-          // Plain text line, use as-is.
+          // Non-JSON lines (e.g. tracebacks from subprocesses) — skip.
         }
-        appendLiveOutput(container, msg);
         return;
       }
 
