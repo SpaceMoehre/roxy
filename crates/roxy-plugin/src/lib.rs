@@ -2,15 +2,15 @@
 //!
 //! Exposes public types and functions used by the `roxy` runtime and API surface.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{RwLock, broadcast},
+    sync::{RwLock, broadcast, mpsc},
     time::{Duration, timeout},
 };
 
@@ -85,6 +85,7 @@ pub struct PluginManager {
     settings: Arc<RwLock<HashMap<String, Value>>>,
     alterations: Arc<RwLock<HashMap<String, Vec<PluginAlteration>>>>,
     events_tx: Arc<broadcast::Sender<PluginManagerEvent>>,
+    python_path: Arc<RwLock<PathBuf>>,
 }
 
 impl Default for PluginManager {
@@ -95,6 +96,7 @@ impl Default for PluginManager {
             settings: Arc::new(RwLock::new(HashMap::new())),
             alterations: Arc::new(RwLock::new(HashMap::new())),
             events_tx: Arc::new(events_tx),
+            python_path: Arc::new(RwLock::new(PathBuf::from("python3"))),
         }
     }
 }
@@ -109,6 +111,16 @@ impl PluginManager {
     /// ```
     pub fn subscribe_events(&self) -> broadcast::Receiver<PluginManagerEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// Sets the Python interpreter path used to execute plugin scripts.
+    pub async fn set_python_path(&self, path: PathBuf) {
+        *self.python_path.write().await = path;
+    }
+
+    /// Returns the currently configured Python interpreter path.
+    pub async fn python_path(&self) -> PathBuf {
+        self.python_path.read().await.clone()
     }
 
     fn publish_event(&self, event: PluginManagerEvent) {
@@ -228,7 +240,51 @@ impl PluginManager {
         let invocation = self
             .enrich_invocation_payload(plugin_name, invocation)
             .await;
-        run_python_plugin(&plugin, invocation).await
+        let python = self.python_path.read().await.clone();
+        run_python_plugin(&python, &plugin, invocation).await
+    }
+
+    /// Spawns a plugin invocation that streams its stderr lines into the
+    /// returned receiver.  The final [`PluginResponse`] from stdout is sent
+    /// on the `result_tx` oneshot when the process exits.
+    pub async fn invoke_streaming(
+        &self,
+        plugin_name: &str,
+        invocation: PluginInvocation,
+    ) -> Result<(
+        mpsc::Receiver<String>,
+        tokio::sync::oneshot::Receiver<Result<PluginResponse>>,
+    )> {
+        let plugin = self
+            .registry
+            .read()
+            .await
+            .get(plugin_name)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown plugin: {plugin_name}"))?;
+
+        if !plugin.hooks.iter().any(|h| h == &invocation.hook) {
+            return Err(anyhow!(
+                "plugin '{}' does not expose hook '{}'",
+                plugin_name,
+                invocation.hook
+            ));
+        }
+
+        let invocation = self
+            .enrich_invocation_payload(plugin_name, invocation)
+            .await;
+        let python = self.python_path.read().await.clone();
+        let (line_tx, line_rx) = mpsc::channel::<String>(512);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let result =
+                run_python_plugin_streaming(&python, &plugin, invocation, line_tx).await;
+            let _ = result_tx.send(result);
+        });
+
+        Ok((line_rx, result_rx))
     }
 
     /// Executes `invoke all`.
@@ -274,7 +330,8 @@ impl PluginManager {
                 },
                 settings,
             );
-            let response = timeout(timeout_per_plugin, run_python_plugin(&plugin, invocation))
+            let python = self.python_path.read().await.clone();
+            let response = timeout(timeout_per_plugin, run_python_plugin(&python, &plugin, invocation))
                 .await
                 .map_err(|_| anyhow!("plugin '{}' timed out", plugin.name))
                 .and_then(|r| r);
@@ -482,12 +539,13 @@ fn string_substitute_has_rules(settings: &Value) -> bool {
 }
 
 async fn run_python_plugin(
+    python: &Path,
     plugin: &PluginRegistration,
     invocation: PluginInvocation,
 ) -> Result<PluginResponse> {
     let input = serde_json::to_vec(&invocation).context("failed serializing plugin invocation")?;
 
-    let mut command = Command::new("python3");
+    let mut command = Command::new(python);
     command.arg(&plugin.script_path);
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
@@ -524,6 +582,85 @@ async fn run_python_plugin(
     }
 
     let value: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("plugin '{}' returned invalid JSON", plugin.name))?;
+
+    Ok(PluginResponse {
+        plugin: plugin.name.clone(),
+        hook: invocation.hook,
+        output: value,
+    })
+}
+
+/// Like [`run_python_plugin`] but streams each stderr line into `line_tx`
+/// as it is produced, enabling real-time progress updates.
+async fn run_python_plugin_streaming(
+    python: &Path,
+    plugin: &PluginRegistration,
+    invocation: PluginInvocation,
+    line_tx: mpsc::Sender<String>,
+) -> Result<PluginResponse> {
+    let input = serde_json::to_vec(&invocation).context("failed serializing plugin invocation")?;
+
+    let mut command = Command::new(python);
+    command.arg(&plugin.script_path);
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed spawning python plugin {}", plugin.name))?;
+
+    // Write the invocation JSON to stdin.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&input)
+            .await
+            .context("failed writing plugin stdin")?;
+        stdin
+            .shutdown()
+            .await
+            .context("failed closing plugin stdin")?;
+    }
+
+    // Stream stderr lines in real time.
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture plugin stderr")?;
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    // Read stdout in a separate task so we don't deadlock.
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture plugin stdout")?;
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut tokio::io::BufReader::new(stdout), &mut buf)
+            .await
+            .map(|_| buf)
+    });
+
+    while let Some(line) = stderr_reader.next_line().await.unwrap_or(None) {
+        let _ = line_tx.send(line).await;
+    }
+
+    let status = child.wait().await.context("failed waiting for plugin")?;
+    let stdout_bytes = stdout_task
+        .await
+        .context("stdout reader task panicked")?
+        .context("failed reading plugin stdout")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "plugin '{}' exited with status {}",
+            plugin.name,
+            status,
+        ));
+    }
+
+    let value: Value = serde_json::from_slice(&stdout_bytes)
         .with_context(|| format!("plugin '{}' returned invalid JSON", plugin.name))?;
 
     Ok(PluginResponse {

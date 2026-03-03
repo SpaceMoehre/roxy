@@ -1,0 +1,64 @@
+<section class="card compact" id="plugins-sublist3r-enumerate">
+  <div class="panel-head">
+    <h4>Subdomain Enumeration</h4>
+  </div>
+  <p class="hint">
+    Enter a target domain to discover subdomains using OSINT sources
+    (Sublist3r API, crt.sh, and optionally the full Sublist3r tool).
+  </p>
+  <div class="sublist3r-input-row" style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem;">
+    <input
+      type="text"
+      class="sublist3r-domain"
+      placeholder="example.com"
+      style="flex:1;"
+    />
+    <button class="sublist3r-enumerate-btn" type="button">Enumerate</button>
+  </div>
+  <div class="sublist3r-status hint" style="margin-bottom:.5rem;"></div>
+  <details class="sublist3r-output-details" style="margin-top:.5rem;">
+    <summary style="cursor:pointer;font-size:.85rem;font-weight:600;user-select:none;">Scan Output</summary>
+    <div class="sublist3r-live-output scroll-list" style="max-height:260px;overflow-y:auto;font-family:var(--font-mono, monospace);font-size:.8rem;padding:.35rem .5rem;background:var(--color-surface-alt, #1a1a2e);border-radius:4px;margin-top:.35rem;white-space:pre-wrap;"></div>
+  </details>
+</section>
+
+<section class="card compact" id="plugins-sublist3r-results" style="display:none;">
+  <div class="panel-head">
+    <h4>Discovered Subdomains</h4>
+    <span class="sublist3r-result-count badge" style="margin-left:auto;"></span>
+  </div>
+  <div class="sublist3r-scope-actions" style="display:flex;gap:.5rem;margin-bottom:.75rem;flex-wrap:wrap;">
+    <button class="sublist3r-add-all" type="button">Add All to Scope</button>
+    <button class="sublist3r-add-selected" type="button">Add Selected to Scope</button>
+    <label style="display:flex;align-items:center;gap:.3rem;margin-left:auto;font-size:.85rem;">
+      <input type="checkbox" class="sublist3r-select-all" />
+      Select All
+    </label>
+  </div>
+  <div class="sublist3r-list scroll-list" style="max-height:420px;overflow-y:auto;"></div>
+  <div class="sublist3r-sources hint" style="margin-top:.5rem;font-size:.8rem;"></div>
+</section>
+
+<section class="card compact" id="plugins-sublist3r-sources-config">
+  <div class="panel-head">
+    <h4>Enumeration Sources</h4>
+  </div>
+  <div class="stack" style="gap:.5rem;">
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" class="sublist3r-opt-api" checked />
+      Sublist3r PassiveDNS API
+    </label>
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" class="sublist3r-opt-crtsh" checked />
+      crt.sh Certificate Transparency
+    </label>
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" class="sublist3r-opt-full" />
+      Full Sublist3r tool (requires <code>sublist3r</code> Python package)
+    </label>
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" class="sublist3r-opt-brute" />
+      Enable bruteforce (full tool only)
+    </label>
+  </div>
+</section>

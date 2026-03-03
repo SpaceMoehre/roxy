@@ -405,6 +405,7 @@ pub async fn run_api_with_shutdown_and_ready(
                                 web::get().to(list_plugin_alterations),
                             )
                             .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
+                            .route("/plugins/{id}/invoke-stream", web::post().to(invoke_plugin_stream))
                             .route(
                                 "/plugins/{id}/template/{file}",
                                 web::get().to(get_plugin_template),
@@ -562,6 +563,7 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                             web::get().to(list_plugin_alterations),
                         )
                         .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
+                        .route("/plugins/{id}/invoke-stream", web::post().to(invoke_plugin_stream))
                         .route(
                             "/plugins/{id}/template/{file}",
                             web::get().to(get_plugin_template),
@@ -1115,6 +1117,73 @@ async fn invoke_plugin(
         }
         Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
     }
+}
+
+async fn invoke_plugin_stream(
+    state: web::types::State<ApiState>,
+    path: web::types::Path<PluginPath>,
+    req: web::types::Json<InvokePluginRequest>,
+) -> HttpResponse {
+    let scan_id = Uuid::new_v4().to_string();
+    let plugin_name = path.id.clone();
+    let invocation = PluginInvocation {
+        hook: req.hook.clone(),
+        payload: req.payload.clone(),
+    };
+
+    let (mut line_rx, result_rx) = match state.plugins.invoke_streaming(&plugin_name, invocation).await {
+        Ok(pair) => pair,
+        Err(err) => return json_error(HttpResponse::BadRequest(), &err.to_string()),
+    };
+
+    let ws_hub = state.ws_hub.clone();
+    let app_state = state.app_state.clone();
+    let ui_modules = state.ui_modules.clone();
+    let scan_id_bg = scan_id.clone();
+    let plugin_name_bg = plugin_name.clone();
+
+    tokio::spawn(async move {
+        // Forward each stderr line as a WS event.
+        while let Some(line) = line_rx.recv().await {
+            ws_hub.publish(&serde_json::json!({
+                "event": "plugin_stream_output",
+                "payload": {
+                    "plugin": plugin_name_bg,
+                    "scan_id": scan_id_bg,
+                    "line": line,
+                }
+            }));
+        }
+
+        // Process the final result.
+        let outcome = match result_rx.await {
+            Ok(Ok(result)) => {
+                let applied = apply_plugin_output_ops(&app_state, &ui_modules, &result.output);
+                serde_json::json!({
+                    "plugin_result": result,
+                    "state_ops_applied": applied.state_ops_applied,
+                    "ui_modules_registered": applied.ui_modules_registered,
+                })
+            }
+            Ok(Err(err)) => serde_json::json!({ "error": err.to_string() }),
+            Err(_) => serde_json::json!({ "error": "plugin task dropped" }),
+        };
+
+        ws_hub.publish(&serde_json::json!({
+            "event": "plugin_stream_complete",
+            "payload": {
+                "plugin": plugin_name_bg,
+                "scan_id": scan_id_bg,
+                "result": outcome,
+            }
+        }));
+    });
+
+    HttpResponse::Accepted().json(&serde_json::json!({
+        "scan_id": scan_id,
+        "plugin": plugin_name,
+        "status": "started",
+    }))
 }
 
 #[derive(Deserialize)]

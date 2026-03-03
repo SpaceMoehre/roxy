@@ -216,6 +216,9 @@ async fn main() -> Result<()> {
     let cert_manager = Arc::new(CertManager::load_or_create(data_dir.join("certs"))?);
     let storage = StorageManager::open(data_dir.join("storage"))?;
     let plugins = PluginManager::default();
+    if let Some(venv_python) = ensure_plugin_venv(&data_dir) {
+        plugins.set_python_path(venv_python).await;
+    }
     let intruder = IntruderManager::default();
     let ws_hub = WsHub::new(4096);
     let ui_modules = Arc::new(UiModuleRegistry::with_builtin_modules());
@@ -798,6 +801,7 @@ fn infer_plugin_hooks(script: &Path) -> Vec<String> {
         "on_request_pre_capture",
         "on_response_pre_capture",
         "decoder",
+        "enumerate",
     ];
 
     let source = match fs::read_to_string(script) {
@@ -882,6 +886,44 @@ fn resolve_plugin_dir() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Creates a Python virtual environment at `<data_dir>/venv` (if it doesn't
+/// already exist) and returns the path to its `python` interpreter.  Returns
+/// `None` when venv creation fails so the app can fall back to the system
+/// `python3`.
+fn ensure_plugin_venv(data_dir: &Path) -> Option<PathBuf> {
+    let venv_dir = data_dir.join("venv");
+    let python = venv_dir.join("bin").join("python");
+
+    if python.is_file() {
+        info!(python = %python.display(), "plugin venv already exists");
+        return Some(python);
+    }
+
+    info!(venv = %venv_dir.display(), "creating plugin virtual environment");
+
+    let result = std::process::Command::new("python3")
+        .args(["-m", "venv", "--clear"])
+        .arg(&venv_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .status();
+
+    match result {
+        Ok(status) if status.success() && python.is_file() => {
+            info!(python = %python.display(), "plugin venv created");
+            Some(python)
+        }
+        Ok(status) => {
+            warn!(%status, "python3 -m venv exited unsuccessfully");
+            None
+        }
+        Err(err) => {
+            warn!(%err, "failed to create plugin venv");
+            None
+        }
+    }
 }
 
 fn apply_plugin_output_ops(

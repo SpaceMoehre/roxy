@@ -229,6 +229,20 @@
         return;
       }
 
+      if (
+        (event.event === "plugin_stream_output" || event.event === "plugin_stream_complete") &&
+        event.payload
+      ) {
+        const streamPluginId = event.payload.plugin;
+        if (selectedPluginId(ctx) === streamPluginId) {
+          const streamUi = getPluginUI(streamPluginId);
+          if (streamUi && streamUi.onRealtimeEvent) {
+            streamUi.onRealtimeEvent(ctx.qs("plugins-template-container"), event, ctx);
+          }
+        }
+        return;
+      }
+
       if (event.event === "plugin_registered" || event.event === "plugin_unregistered") {
         await loadPlugins(ctx);
         _loadedPluginTemplate = null;
