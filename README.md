@@ -1,253 +1,249 @@
-# roxy
+<p align="center">
+  <img src="assets/banner.svg" alt="Roxy" width="900"/>
+</p>
 
-High-performance, async-first HTTP(S) interception proxy for security testing workflows.
+<p align="center">
+  <b>A Burp/ZAP-class interception proxy built from scratch in Rust.</b><br/>
+  Async-first &middot; MITM TLS &middot; Full-text search &middot; Plugin-extensible
+</p>
 
-`roxy` (rust-proxy) is a Burp/ZAP-style foundation built in Rust with non-blocking I/O, MITM interception, live API control, and searchable traffic history.
+<p align="center">
+  <a href="https://github.com/simonsan/roxy/actions"><img src="https://img.shields.io/github/actions/workflow/status/simonsan/roxy/ci-release.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.89+-orange?style=flat-square&logo=rust" alt="Rust"></a>
+  <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"></a>
+</p>
 
-## Overview
+---
 
-| Area | Implementation |
+## Why Roxy?
+
+Most proxy tools are built on legacy stacks. **Roxy** is a ground-up Rust implementation using `tokio`, `hyper`, and `boring` (BoringSSL) — giving you a single-binary proxy with real async I/O, on-the-fly cert generation, and a modern web UI, all on one port.
+
+---
+
+## Features
+
+| | |
 |---|---|
-| Runtime | `tokio` |
-| Proxy Core | `hyper` + `tokio-boring` |
-| HTTPS MITM | `tokio-boring` + on-the-fly cert generation |
-| Web/API Server | `ntex` |
-| Realtime Events | `tokio-tungstenite` |
-| Persistence | `sled` (raw exchange store) + `tantivy` (full-text search) |
-| Shared State | `DashMap` / lock-free atomics where appropriate |
-| Plugin Runtime | Python subprocess protocol (`roxy-plugin`) |
+| **Proxy & MITM** | HTTP/HTTPS interception with CONNECT tunneling, per-domain cert cache, and request/response mutation queues |
+| **Web UI** | Target scope, Proxy (intercept + history), Intruder, Repeater, Decoder, Settings — all served from the proxy port |
+| **Full-text Search** | Every captured exchange is indexed by `tantivy` for instant history search |
+| **Intruder** | Async job execution with `sniper` and `cluster_bomb` strategies and live progress via WebSocket |
+| **Plugins** | Python subprocess protocol with middleware hooks, dynamic UI injection, and state control |
+| **ECH Support** | Encrypted Client Hello with automatic DNS HTTPS record resolution and GREASE fallback |
+| **Single Port** | Proxy traffic, REST API, web UI, and WebSocket upgrades all on one listener |
 
-## Key Features
+---
 
-- HTTP and HTTPS proxying with CONNECT support.
-- MITM TLS interception with generated CA + per-domain cert cache.
-- Request and response interception queues with continue/drop/mutate controls.
-- Queue draining behavior when request interception is disabled.
-- Port auto-increment on bind conflicts for proxy, API, and WS listeners.
-- Web UI served from `/` with sections:
-  - Target
-  - Proxy (Intercept + History subtabs)
-  - Intruder
-  - Repeater
-  - Decoder
-  - Settings
-- Dynamic UI module registration from plugins (`register_ui_modules` output op).
-- Proxy history UX:
-  - upper list of captured requests
-  - lower split viewer for selected item
-  - mode toggles: request / response / both
-- Intruder with async job execution, strategies (`cluster_bomb`, `sniper`), and live progress.
-- Repeater and Decoder exposed as API operations.
-- Plugin state operations (toggle intercept/MITM/scope from plugin outputs).
-- Plugin autoload from `plugins/` directory at startup.
+## Quick Start
+
+### From source
+
+```bash
+# Clone & run
+git clone https://github.com/simonsan/roxy.git && cd roxy
+cargo run -p roxy
+```
+
+Open **http://127.0.0.1:8080** — the web UI, API, and proxy all live here.
+
+### Docker
+
+```bash
+docker compose up -d
+```
+
+### Docker (standalone)
+
+```bash
+docker build -t roxy .
+docker run -p 8080:8080 roxy
+```
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     C[Client] --> P[Proxy Engine]
-    P -->|forward| U[Upstream Server]
-    P -->|captured exchange| Q[(mpsc queue)]
-    Q --> S[Storage Ingestor]
+    P -->|forward| U[Upstream]
+    P -->|capture| Q[(mpsc)]
+    Q --> S[Storage]
     S --> SD[(sled)]
     S --> T[(tantivy)]
     P --> I[Intercept Queue]
-    UI[Web UI / API] --> I
-    UI --> A[ntex API]
-    A --> ST[App State]
-    A --> PL[Plugin Manager]
-    E[Event Hub / WS] --> UI
-    P --> E
-    S --> E
+    UI[Web UI] --> A[API]
+    A --> I
+    A --> ST[State]
+    A --> PL[Plugins]
+    WS[WebSocket] --> UI
+    P --> WS
+    S --> WS
 ```
 
-## Workspace Layout
+### Crate Map
 
-| Crate | Responsibility |
+| Crate | Role |
 |---|---|
-| `crates/roxy-core` | Proxy engine, MITM, certs, state, intruder core logic |
-| `crates/roxy-storage` | Exchange persistence + history search/list |
-| `crates/roxy-api` | HTTP API + embedded web assets + WS server |
-| `crates/roxy-plugin` | Python plugin process interface |
-| `crates/roxy` | Composition binary and task orchestration |
+| `roxy-core` | Proxy engine, MITM, certs, state, intruder logic |
+| `roxy-tls` | TLS client/server, ECH support |
+| `roxy-storage` | Exchange persistence + full-text search |
+| `roxy-api` | REST API, embedded web assets, WebSocket server |
+| `roxy-plugin` | Python plugin subprocess protocol |
+| `roxy-app` | Composition binary & task orchestration |
 
-## Quick Start
+### Tech Stack
 
-### Prerequisites
+| Layer | Implementation |
+|---|---|
+| Runtime | `tokio` |
+| Proxy | `hyper` + `tokio-boring` |
+| TLS/MITM | BoringSSL via `boring` — on-the-fly cert generation |
+| API/Web | `ntex` |
+| Realtime | `tokio-tungstenite` |
+| Storage | `sled` (KV) + `tantivy` (full-text) |
+| State | `DashMap` / lock-free atomics |
 
-- Rust stable toolchain
-- `cargo`
+---
 
-### Run
+## Configuration
 
-```bash
-ROXY_BIND=127.0.0.1:8080 \
-ROXY_DATA_DIR=.roxy-data \
-cargo run -p roxy
-```
+All configuration is via environment variables. Sensible defaults are provided.
 
-Debug startup with CLI flag:
-
-```bash
-cargo run -p roxy -- --debug
-```
-
-Open:
-
-- Web UI: `http://127.0.0.1:8080/`
-- API base: `http://127.0.0.1:8080/api/v1`
-
-Notes:
-
-- roxy runs on a single public port: one listener handles proxy traffic, API/UI, and WebSocket upgrade requests.
-- If a bind address is already in use, roxy increments port(s) until an available one is found.
-
-## Runtime Configuration
-
-| Env Var | Default | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `ROXY_BIND` | `127.0.0.1:8080` | Public listener (proxy + API/UI + WS upgrade) |
-| `ROXY_DATA_DIR` | `.roxy-data` | Cert and storage root |
-| `ROXY_PLUGIN_DIR` | `./plugins` | Python plugin autoload directory |
-| `ROXY_DEBUG_LOGGING` | `false` | Enables extensive proxy debug logs |
-| `ROXY_DEBUG_LOG_BODIES` | `false` | Includes request/response body previews in debug logs |
-| `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes logged per body preview |
-| `ROXY_ECH_ENABLED` | `true` | Enables ECH behavior for outbound TLS clients |
-| `ROXY_ECH_GREASE` | `true` | Sends ECH GREASE when true |
-| `ROXY_ECH_CONFIG_LIST_BASE64` | _unset_ | Optional base64-encoded `ECHConfigList` override (otherwise resolved automatically per domain via DNS HTTPS records) |
-
-Debugging example:
+| `ROXY_BIND` | `127.0.0.1:8080` | Listener address (proxy + API/UI + WS) |
+| `ROXY_DATA_DIR` | `.roxy-data` | Cert store & data root |
+| `ROXY_PLUGIN_DIR` | `./plugins` | Plugin autoload directory |
+| `ROXY_DEBUG_LOGGING` | `false` | Verbose proxy debug logs |
+| `ROXY_DEBUG_LOG_BODIES` | `false` | Include body previews in debug output |
+| `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes per body preview |
+| `ROXY_ECH_ENABLED` | `true` | Encrypted Client Hello |
+| `ROXY_ECH_GREASE` | `true` | ECH GREASE when no config available |
+| `ROXY_ECH_CONFIG_LIST_BASE64` | — | Optional base64 `ECHConfigList` override |
 
 ```bash
-ROXY_DEBUG_LOGGING=true \
-ROXY_DEBUG_LOG_BODIES=true \
-ROXY_DEBUG_LOG_BODY_LIMIT=8192 \
-RUST_LOG=debug \
-cargo run -p roxy
+# Debug mode example
+ROXY_DEBUG_LOGGING=true RUST_LOG=debug cargo run -p roxy -- --debug
 ```
 
-## API Summary
+---
 
-Base: `/api/v1`
+<details>
+<summary><strong>API Reference</strong></summary>
 
-### Health / WS
+Base path: `/api/v1`
 
-- `GET /health`
-- `GET /ws/stats`
+#### Health
 
-### Proxy Controls
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `GET` | `/ws/stats` | WebSocket stats stream |
 
-- `GET|PUT /proxy/intercept`
-- `GET|PUT /proxy/intercept-response`
-- `GET|PUT /proxy/mitm`
-- `GET /proxy/intercepts`
-- `POST /proxy/intercepts/{id}/continue`
-- `GET /proxy/response-intercepts`
-- `POST /proxy/response-intercepts/{id}/continue`
-- `GET /proxy/settings/ca.der`
-- `POST /proxy/settings/ca/regenerate`
+#### Proxy Controls
 
-### Target / History
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET\|PUT` | `/proxy/intercept` | Request interception toggle |
+| `GET\|PUT` | `/proxy/intercept-response` | Response interception toggle |
+| `GET\|PUT` | `/proxy/mitm` | MITM toggle |
+| `GET` | `/proxy/intercepts` | Pending request intercepts |
+| `POST` | `/proxy/intercepts/{id}/continue` | Continue/mutate intercepted request |
+| `GET` | `/proxy/response-intercepts` | Pending response intercepts |
+| `POST` | `/proxy/response-intercepts/{id}/continue` | Continue/mutate intercepted response |
+| `GET` | `/proxy/settings/ca.der` | Download CA certificate |
+| `POST` | `/proxy/settings/ca/regenerate` | Regenerate CA |
 
-- `GET /target/site-map`
-- `GET|PUT|POST /target/scope`
-- `DELETE /target/scope/{host}`
-- `GET /history/search`
-- `GET /history/recent`
+#### Target & History
 
-### Repeater / Decoder / Intruder
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/target/site-map` | Site map tree |
+| `GET\|PUT\|POST` | `/target/scope` | Scope rules |
+| `DELETE` | `/target/scope/{host}` | Remove host from scope |
+| `GET` | `/history/search` | Full-text search |
+| `GET` | `/history/recent` | Recent exchanges |
 
-- `POST /repeater/send`
-- `POST /decoder/transform`
-- `POST|GET /intruder/jobs`
-- `GET|DELETE /intruder/jobs/{id}`
-- `GET /intruder/jobs/{id}/results`
+#### Repeater / Decoder / Intruder
 
-### Plugins
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/repeater/send` | Send crafted request |
+| `POST` | `/decoder/transform` | Encode/decode transform |
+| `POST\|GET` | `/intruder/jobs` | Create or list jobs |
+| `GET\|DELETE` | `/intruder/jobs/{id}` | Get or cancel job |
+| `GET` | `/intruder/jobs/{id}/results` | Job results |
 
-- `GET|POST /ui/modules`
-- `GET|POST /plugins`
-- `DELETE /plugins/{id}`
-- `GET|PUT /plugins/{id}/settings`
-- `GET /plugins/{id}/alterations`
-- `POST /plugins/{id}/invoke`
+#### Plugins
 
-## Testing
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET\|POST` | `/plugins` | List or register plugins |
+| `DELETE` | `/plugins/{id}` | Remove plugin |
+| `GET\|PUT` | `/plugins/{id}/settings` | Plugin settings |
+| `GET` | `/plugins/{id}/alterations` | Alteration history |
+| `POST` | `/plugins/{id}/invoke` | Invoke plugin |
+| `GET\|POST` | `/ui/modules` | Dynamic UI modules |
 
-### Standard test suite
+</details>
 
-```bash
-cargo test --all
-```
+---
 
-### Integration tests that require real sockets/network
+## Plugins
 
-Ignored tests are provided for true runtime scenarios (process startup, live proxying, history verification):
-
-```bash
-cargo test -p roxy -- --ignored --nocapture
-```
-
-Included:
-
-- script-based API smoke test
-- proxy intercept + history end-to-end
-- HTTPS `ifconfig.co` via proxy + capture validation
-- plugin middleware substitution + dynamic module registration end-to-end
-
-## CI/CD (GitHub Actions)
-
-Workflow file: `.github/workflows/ci-release.yml`
-
-- On `push` / `pull_request`: runs format check and full test suite.
-- On any tag push (example: `v0.2.0`) or GitHub Release publish:
-  - builds `roxy` release executable and uploads assets to GitHub Release
-  - builds and pushes Docker image to Docker Hub
-
-Required repository secrets:
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
-
-Docker image target:
-
-- `docker.io/<DOCKERHUB_USERNAME>/roxy:<tag>`
-- `docker.io/<DOCKERHUB_USERNAME>/roxy:latest`
-
-## Plugin Notes
-
-- Plugins are external Python scripts managed by the plugin manager.
-- Middleware hooks are available:
-  - `on_request_pre_capture`
-  - `on_response_pre_capture`
-- The Web UI includes a dedicated `Plugins` tab with:
-  - installed plugin dropdown
-  - plugin settings editor
-  - alteration history list
-- Plugin-defined settings UI can be injected dynamically into the global Settings tab through `register_ui_modules`.
-- Decoder extension mode format: `plugin:<plugin-name>`.
-- Plugin output can include:
-  - `state_ops` to mutate runtime controls (e.g. intercept flags, MITM, scope hosts)
-  - `register_ui_modules` to inject custom web tabs/settings sections
-- Python SDK package is included at `python/roxy-plugin-sdk` and can be installed with:
+Roxy supports Python plugins that hook into the proxy pipeline.
 
 ```bash
+# Install the SDK
 pip install ./python/roxy-plugin-sdk
 ```
 
-- Demo plugin: `plugins/string_substitute/string_substitute.py` (request/response string substitution middleware + module registration).
+**Middleware hooks:** `on_request_pre_capture` · `on_response_pre_capture`
 
-## Current Status and Roadmap
+Plugins can:
+- Mutate requests and responses in-flight
+- Toggle runtime flags (intercept, MITM, scope) via `state_ops`
+- Inject custom UI tabs and settings panels via `register_ui_modules`
+- Extend the Decoder with custom transforms (`plugin:<name>`)
 
-Implemented now:
+Bundled plugins live in `plugins/` and are auto-loaded at startup.
 
-- Full async proxy pipeline with interception, storage, and web/API control.
+---
 
-Planned next milestones:
+## Testing
 
-- More advanced intruder payload templating/marking workflows.
-- Expanded auth/RBAC and multi-tenant API controls.
+```bash
+# Unit + integration tests
+cargo test --all
+
+# End-to-end tests (requires network)
+cargo test -p roxy -- --ignored --nocapture
+```
+
+E2E coverage includes API smoke tests, proxy intercept round-trips, HTTPS capture validation, and plugin middleware flows.
+
+---
+
+## CI/CD
+
+GitHub Actions workflow at `.github/workflows/ci-release.yml`:
+
+- **Push / PR** — format check + full test suite
+- **Tag push / Release** — builds release binary, uploads GitHub Release assets, pushes Docker image to Docker Hub
+
+---
+
+## Roadmap
+
+- [x] Full async proxy pipeline with interception, storage, and web/API control
+- [ ] Advanced intruder payload templating & marking workflows
+- [ ] Auth / RBAC and multi-tenant API controls
+
+---
 
 ## License
 
-[MIT](LICENSE)
+[GPL-3.0](LICENSE)

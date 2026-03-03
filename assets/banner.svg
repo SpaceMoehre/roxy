@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" width="900" height="250" role="img" aria-labelledby="bannerTitle bannerDesc">
+  <title id="bannerTitle">Roxy Banner</title>
+  <desc id="bannerDesc">Horizontal banner with hex-core logo and Roxy wordmark for the project README.</desc>
+
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080e1e"/>
+      <stop offset="100%" stop-color="#0d1630"/>
+    </linearGradient>
+    <linearGradient id="hexGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#18f0ff"/>
+      <stop offset="55%" stop-color="#4b8dff"/>
+      <stop offset="100%" stop-color="#6a4dff"/>
+    </linearGradient>
+    <linearGradient id="strokeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#89ffff"/>
+      <stop offset="100%" stop-color="#8aa7ff"/>
+    </linearGradient>
+    <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#18f0ff"/>
+      <stop offset="50%" stop-color="#4b8dff"/>
+      <stop offset="100%" stop-color="#6a4dff"/>
+    </linearGradient>
+    <linearGradient id="tagGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#5eb8c7"/>
+      <stop offset="100%" stop-color="#7a8ec4"/>
+    </linearGradient>
+    <linearGradient id="edgeGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#18f0ff" stop-opacity="0.4"/>
+      <stop offset="50%" stop-color="#4b8dff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#6a4dff" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <!-- Logo mask for R lettermark -->
+    <filter id="rMaskSoft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="0.5"/>
+    </filter>
+    <mask id="rMask" maskUnits="userSpaceOnUse" x="0" y="0" width="900" height="250">
+      <rect x="0" y="0" width="900" height="250" fill="black"/>
+      <g
+        fill="none"
+        stroke="white"
+        stroke-width="13"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        filter="url(#rMaskSoft)"
+      >
+        <path d="M78 68H115C129 68 138 77 138 91C138 104 129 113 115 113H78"/>
+        <path d="M110 113L146 138"/>
+      </g>
+    </mask>
+
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowSoft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowText" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Subtle grid pattern for background texture -->
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1a2744" stroke-width="0.5" opacity="0.4"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="250" rx="16" fill="url(#bgGrad)"/>
+  <rect width="900" height="250" rx="16" fill="url(#grid)"/>
+
+  <!-- Top and bottom accent lines -->
+  <line x1="0" y1="2" x2="900" y2="2" stroke="url(#edgeGlow)" stroke-width="2"/>
+  <line x1="0" y1="248" x2="900" y2="248" stroke="url(#edgeGlow)" stroke-width="2"/>
+
+  <!-- === Logo group (left) === -->
+  <g transform="translate(40, 20)">
+    <!-- Outer hex -->
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path
+        d="M110 8L192 55V149L110 196L28 149V55Z"
+        fill="#0d1222"
+        stroke="url(#hexGrad)"
+        stroke-width="9"
+        filter="url(#glow)"
+      />
+      <!-- Inner hex -->
+      <path
+        d="M110 36L168 70V140L110 174L52 140V70Z"
+        fill="#101933"
+        stroke="#243764"
+        stroke-width="2.5"
+      />
+    </g>
+
+    <!-- R lettermark via mask -->
+    <g mask="url(#rMask)" filter="url(#glow)">
+      <rect x="65" y="55" width="100" height="100" fill="url(#strokeGrad)"/>
+      <rect x="65" y="55" width="100" height="100" fill="url(#hexGrad)" opacity="0.2"/>
+    </g>
+  </g>
+
+  <!-- === Wordmark === -->
+  <g filter="url(#glowText)">
+    <text x="290" y="130" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="88" letter-spacing="8" fill="url(#wordGrad)">
+      ROXY
+    </text>
+  </g>
+
+  <!-- === Tagline === -->
+  <text x="295" y="170" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="500" font-size="17" letter-spacing="5.5" fill="url(#tagGrad)" opacity="0.85">
+    INTERCEPT &#xB7; SCAN &#xB7; INTRUDE
+  </text>
+</svg>
