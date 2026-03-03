@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="105 41 302 334" width="302" height="334" role="img" aria-labelledby="title desc">
+  <title id="title">Roxy Tech Logo</title>
+  <desc id="desc">A geometric hex-core logo with a masked gradient R lettermark.</desc>
+
+  <defs>
+    <linearGradient id="hexGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#18f0ff"/>
+      <stop offset="55%" stop-color="#4b8dff"/>
+      <stop offset="100%" stop-color="#6a4dff"/>
+    </linearGradient>
+    <linearGradient id="strokeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#89ffff"/>
+      <stop offset="100%" stop-color="#8aa7ff"/>
+    </linearGradient>
+    <filter id="rMaskSoft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="0.7"/>
+    </filter>
+    <mask id="rMask" maskUnits="userSpaceOnUse" x="176" y="146" width="160" height="160">
+      <rect x="0" y="0" width="512" height="512" fill="black"/>
+      <g
+        fill="none"
+        stroke="white"
+        stroke-width="22"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        filter="url(#rMaskSoft)"
+      >
+        <path d="M200 162H265C289 162 306 178 306 202C306 226 289 242 265 242H200"/>
+        <path d="M256 242L320 286"/>
+      </g>
+    </mask>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path
+      d="M256 48L400 128V288L256 368L112 288V128Z"
+      fill="#0d1222"
+      stroke="url(#hexGrad)"
+      stroke-width="14"
+      filter="url(#glow)"
+    />
+
+    <path
+      d="M256 92L362 152V264L256 324L150 264V152Z"
+      fill="#101933"
+      stroke="#243764"
+      stroke-width="4"
+    />
+
+  </g>
+  <g mask="url(#rMask)" filter="url(#glow)" transform="translate(0 -14)">
+    <rect x="176" y="146" width="160" height="160" fill="url(#strokeGrad)"/>
+    <rect x="176" y="146" width="160" height="160" fill="url(#hexGrad)" opacity="0.2"/>
+  </g>
+</svg>

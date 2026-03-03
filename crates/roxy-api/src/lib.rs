@@ -38,6 +38,17 @@ use crate::ws::WsHub;
 const INDEX_TEMPLATE: &str = include_str!("../web/templates/index.html.tera");
 const APP_TEMPLATE: &str = include_str!("../web/templates/app.js.tera");
 const STYLES_CSS: &str = include_str!("../web/styles.css");
+const FAVICON_SVG: &str = include_str!("../web/icons/favicon.svg");
+const SAFARI_PINNED_TAB_SVG: &str = include_str!("../web/icons/safari-pinned-tab.svg");
+const SITE_WEBMANIFEST: &str = include_str!("../web/icons/site.webmanifest");
+const BROWSERCONFIG_XML: &str = include_str!("../web/icons/browserconfig.xml");
+const FAVICON_ICO: &[u8] = include_bytes!("../web/icons/favicon.ico");
+const FAVICON_16_PNG: &[u8] = include_bytes!("../web/icons/favicon-16x16.png");
+const FAVICON_32_PNG: &[u8] = include_bytes!("../web/icons/favicon-32x32.png");
+const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
+const ANDROID_CHROME_192_PNG: &[u8] = include_bytes!("../web/icons/android-chrome-192x192.png");
+const ANDROID_CHROME_512_PNG: &[u8] = include_bytes!("../web/icons/android-chrome-512x512.png");
+const MSTILE_150_PNG: &[u8] = include_bytes!("../web/icons/mstile-150x150.png");
 
 #[derive(Clone)]
 /// Represents `ApiState`.
@@ -314,6 +325,26 @@ pub async fn run_api_with_shutdown_and_ready(
                     .route("/", web::get().to(index))
                     .route("/app.js", web::get().to(app_js))
                     .route("/styles.css", web::get().to(styles_css))
+                    .route("/favicon.ico", web::get().to(favicon_ico))
+                    .route("/favicon.svg", web::get().to(favicon_svg))
+                    .route("/favicon-16x16.png", web::get().to(favicon_16_png))
+                    .route("/favicon-32x32.png", web::get().to(favicon_32_png))
+                    .route("/apple-touch-icon.png", web::get().to(apple_touch_icon_png))
+                    .route(
+                        "/android-chrome-192x192.png",
+                        web::get().to(android_chrome_192_png),
+                    )
+                    .route(
+                        "/android-chrome-512x512.png",
+                        web::get().to(android_chrome_512_png),
+                    )
+                    .route(
+                        "/safari-pinned-tab.svg",
+                        web::get().to(safari_pinned_tab_svg),
+                    )
+                    .route("/site.webmanifest", web::get().to(site_webmanifest))
+                    .route("/browserconfig.xml", web::get().to(browserconfig_xml))
+                    .route("/mstile-150x150.png", web::get().to(mstile_150_png))
                     .service(
                         web::scope("/api/v1")
                             .route("/health", web::get().to(health))
@@ -447,6 +478,26 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                 .route("/", web::get().to(index))
                 .route("/app.js", web::get().to(app_js))
                 .route("/styles.css", web::get().to(styles_css))
+                .route("/favicon.ico", web::get().to(favicon_ico))
+                .route("/favicon.svg", web::get().to(favicon_svg))
+                .route("/favicon-16x16.png", web::get().to(favicon_16_png))
+                .route("/favicon-32x32.png", web::get().to(favicon_32_png))
+                .route("/apple-touch-icon.png", web::get().to(apple_touch_icon_png))
+                .route(
+                    "/android-chrome-192x192.png",
+                    web::get().to(android_chrome_192_png),
+                )
+                .route(
+                    "/android-chrome-512x512.png",
+                    web::get().to(android_chrome_512_png),
+                )
+                .route(
+                    "/safari-pinned-tab.svg",
+                    web::get().to(safari_pinned_tab_svg),
+                )
+                .route("/site.webmanifest", web::get().to(site_webmanifest))
+                .route("/browserconfig.xml", web::get().to(browserconfig_xml))
+                .route("/mstile-150x150.png", web::get().to(mstile_150_png))
                 .service(
                     web::scope("/api/v1")
                         .route("/health", web::get().to(health))
@@ -598,6 +649,64 @@ async fn styles_css() -> HttpResponse {
         .content_type("text/css; charset=utf-8")
         .set_header("cache-control", "no-store")
         .body(STYLES_CSS)
+}
+
+fn static_text_response(content_type: &'static str, body: &'static str) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type(content_type)
+        .set_header("cache-control", "public, max-age=86400")
+        .body(body)
+}
+
+fn static_bytes_response(content_type: &'static str, body: &'static [u8]) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type(content_type)
+        .set_header("cache-control", "public, max-age=86400")
+        .body(body)
+}
+
+async fn favicon_ico() -> HttpResponse {
+    static_bytes_response("image/x-icon", FAVICON_ICO)
+}
+
+async fn favicon_svg() -> HttpResponse {
+    static_text_response("image/svg+xml; charset=utf-8", FAVICON_SVG)
+}
+
+async fn favicon_16_png() -> HttpResponse {
+    static_bytes_response("image/png", FAVICON_16_PNG)
+}
+
+async fn favicon_32_png() -> HttpResponse {
+    static_bytes_response("image/png", FAVICON_32_PNG)
+}
+
+async fn apple_touch_icon_png() -> HttpResponse {
+    static_bytes_response("image/png", APPLE_TOUCH_ICON_PNG)
+}
+
+async fn android_chrome_192_png() -> HttpResponse {
+    static_bytes_response("image/png", ANDROID_CHROME_192_PNG)
+}
+
+async fn android_chrome_512_png() -> HttpResponse {
+    static_bytes_response("image/png", ANDROID_CHROME_512_PNG)
+}
+
+async fn safari_pinned_tab_svg() -> HttpResponse {
+    static_text_response("image/svg+xml; charset=utf-8", SAFARI_PINNED_TAB_SVG)
+}
+
+async fn site_webmanifest() -> HttpResponse {
+    static_text_response("application/manifest+json; charset=utf-8", SITE_WEBMANIFEST)
+}
+
+async fn browserconfig_xml() -> HttpResponse {
+    static_text_response("application/xml; charset=utf-8", BROWSERCONFIG_XML)
+}
+
+async fn mstile_150_png() -> HttpResponse {
+    static_bytes_response("image/png", MSTILE_150_PNG)
 }
 
 async fn health() -> HttpResponse {

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="105 41 302 334" role="img" aria-label="Roxy pinned tab icon">
+  <path d="M256 48L400 128V288L256 368L112 288V128Z" fill="none" stroke="#000" stroke-width="14"/>
+  <g fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M200 162H265C289 162 306 178 306 202C306 226 289 242 265 242H200"/>
+    <path d="M256 242L320 286"/>
+  </g>
+</svg>

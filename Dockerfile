@@ -17,6 +17,7 @@ RUN apt-get update \
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY assets ./assets
 COPY plugins ./plugins
 COPY python/roxy-plugin-sdk ./python/roxy-plugin-sdk
 
@@ -38,6 +39,8 @@ WORKDIR /app
 COPY --from=builder /src/target/release/roxy /usr/local/bin/roxy
 COPY --from=builder /src/plugins ./plugins
 COPY --from=builder /src/python/roxy-plugin-sdk ./python/roxy-plugin-sdk
+COPY --from=builder /src/crates/roxy-api/web ./web
+COPY --from=builder /src/assets ./assets
 
 RUN mkdir -p /data \
     && chown -R roxy:roxy /app /data
