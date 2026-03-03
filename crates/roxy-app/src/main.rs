@@ -1069,8 +1069,8 @@ mod tests {
     use super::{
         AppState, CapturedRequest, CapturedResponse, IngressRoute, UiModuleRegistry,
         apply_plugin_output_ops, apply_request_middleware_output, apply_response_middleware_output,
-        classify_ingress_route, detect_ingress_route, discover_plugin_scripts, parse_bool_env_value,
-        parse_cli_options_from_args,
+        classify_ingress_route, detect_ingress_route, discover_plugin_scripts,
+        parse_bool_env_value, parse_cli_options_from_args,
     };
 
     #[test]
@@ -1132,7 +1132,9 @@ mod tests {
 
     #[tokio::test]
     async fn detect_ingress_route_waits_for_slow_request_bytes() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
 
         let client = tokio::spawn(async move {

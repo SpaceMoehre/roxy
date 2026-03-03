@@ -1,7 +1,19 @@
-<article class="card">
-  <h3>String Substitute</h3>
-  <p>
-    Applies user-defined string substitutions to request and response blobs before they are
-    captured in history.
+<section class="card compact" id="plugins-string-substitute-settings">
+  <div class="panel-head">
+    <h4>String Substitution Rules</h4>
+    <button class="plugin-add-rule">Add Rule</button>
+  </div>
+  <p class="hint">
+    Rules are applied sequentially. Scope can be <code>request</code>, <code>response</code>,
+    or <code>both</code>.
   </p>
-</article>
+  <div class="plugin-rules stack"></div>
+</section>
+
+<section class="card compact">
+  <div class="panel-head">
+    <h4>Altered Requests / Responses</h4>
+    <button class="plugin-refresh-alterations">Refresh</button>
+  </div>
+  <div class="plugin-alterations scroll-list"></div>
+</section>

@@ -189,6 +189,11 @@ impl PluginManager {
         rows
     }
 
+    /// Returns the registration for the given plugin name, if it exists.
+    pub async fn get_registration(&self, name: &str) -> Option<PluginRegistration> {
+        self.registry.read().await.get(name).cloned()
+    }
+
     /// Executes `invoke`.
     ///
     /// # Examples

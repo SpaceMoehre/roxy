@@ -9,33 +9,9 @@
     <select id="plugins-select"></select>
   </div>
 
-  <div class="split-grid">
-    <section class="card compact" id="plugins-string-substitute-settings">
-      <div class="panel-head">
-        <h4>String Substitution Rules</h4>
-        <button id="plugins-string-substitute-add-rule">Add Rule</button>
-      </div>
-      <p class="hint">
-        Rules are applied sequentially. Scope can be <code>request</code>, <code>response</code>,
-        or <code>both</code>.
-      </p>
-      <div id="plugins-string-substitute-rules" class="stack"></div>
-    </section>
+  <div id="plugins-template-container" class="split-grid"></div>
 
-    <section class="card compact">
-      <h4>Raw Plugin Settings (JSON)</h4>
-      <textarea id="plugins-settings-json" rows="10" spellcheck="false">{}</textarea>
-      <div class="button-row">
-        <button id="plugins-save-settings" class="accent">Save Settings</button>
-      </div>
-    </section>
+  <div class="button-row">
+    <button id="plugins-save-settings" class="accent">Save Settings</button>
   </div>
-
-  <section class="card compact">
-    <div class="panel-head">
-      <h4>Altered Requests / Responses</h4>
-      <button id="plugins-refresh-alterations">Refresh</button>
-    </div>
-    <div id="plugins-alterations" class="scroll-list"></div>
-  </section>
 </article>

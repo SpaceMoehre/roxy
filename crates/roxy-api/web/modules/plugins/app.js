@@ -1,6 +1,6 @@
 (() => {
-  const STRING_PLUGIN = "string-substitute";
-  const VALID_SCOPES = new Set(["request", "response", "both"]);
+  let _settingsJson = "{}";
+  let _loadedPluginTemplate = null;
 
   function selectedPluginId(ctx) {
     return ctx.qs("plugins-select")?.value || "";
@@ -18,185 +18,8 @@
     }
   }
 
-  function normalizeScope(value) {
-    const scope = String(value || "both").toLowerCase();
-    return VALID_SCOPES.has(scope) ? scope : "both";
-  }
-
-  function normalizeRules(settings) {
-    if (!settings || typeof settings !== "object") {
-      return [];
-    }
-
-    if (Array.isArray(settings.rules)) {
-      return settings.rules
-        .map((row) => ({
-          search: String(row?.search || ""),
-          replace: String(row?.replace || ""),
-          scope: normalizeScope(row?.scope),
-        }))
-        .filter((row) => row.search.length > 0);
-    }
-
-    // Legacy compatibility for older demo-substitute settings.
-    const out = [];
-    const requestSearch = String(settings.request_search || "");
-    if (requestSearch) {
-      out.push({
-        search: requestSearch,
-        replace: String(settings.request_replace || ""),
-        scope: "request",
-      });
-    }
-    const responseSearch = String(settings.response_search || "");
-    if (responseSearch) {
-      out.push({
-        search: responseSearch,
-        replace: String(settings.response_replace || ""),
-        scope: "response",
-      });
-    }
-    return out;
-  }
-
-  function readRulesFromUi(ctx) {
-    const root = ctx.qs("plugins-string-substitute-rules");
-    const rows = root ? Array.from(root.querySelectorAll(".plugins-substitution-row")) : [];
-    return rows
-      .map((row) => ({
-        search: row.querySelector(".plugins-rule-search")?.value || "",
-        replace: row.querySelector(".plugins-rule-replace")?.value || "",
-        scope: normalizeScope(row.querySelector(".plugins-rule-scope")?.value || "both"),
-      }))
-      .filter((row) => row.search.length > 0);
-  }
-
-  function updateSettingsJsonFromRuleUi(ctx) {
-    if (selectedPluginId(ctx) !== STRING_PLUGIN) {
-      return;
-    }
-    const current = safeParseJson(ctx.qs("plugins-settings-json").value || "{}", {});
-    current.rules = readRulesFromUi(ctx);
-    ctx.qs("plugins-settings-json").value = JSON.stringify(current, null, 2);
-  }
-
-  function createRuleRow(ctx, rule = { search: "", replace: "", scope: "both" }) {
-    const row = document.createElement("div");
-    row.className = "plugins-substitution-row";
-
-    const search = document.createElement("input");
-    search.className = "plugins-rule-search";
-    search.placeholder = "Search";
-    search.value = String(rule.search || "");
-
-    const replace = document.createElement("input");
-    replace.className = "plugins-rule-replace";
-    replace.placeholder = "Replace";
-    replace.value = String(rule.replace || "");
-
-    const scope = document.createElement("select");
-    scope.className = "plugins-rule-scope";
-    for (const value of ["both", "request", "response"]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      scope.appendChild(option);
-    }
-    scope.value = normalizeScope(rule.scope);
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "warn plugins-rule-remove";
-    remove.textContent = "Remove";
-
-    const onEdit = () => updateSettingsJsonFromRuleUi(ctx);
-    search.addEventListener("input", onEdit);
-    replace.addEventListener("input", onEdit);
-    scope.addEventListener("change", onEdit);
-    remove.addEventListener("click", () => {
-      row.remove();
-      updateSettingsJsonFromRuleUi(ctx);
-    });
-
-    row.appendChild(search);
-    row.appendChild(replace);
-    row.appendChild(scope);
-    row.appendChild(remove);
-    return row;
-  }
-
-  function renderRuleRows(ctx, rules) {
-    const root = ctx.qs("plugins-string-substitute-rules");
-    root.innerHTML = "";
-    if (!rules.length) {
-      const empty = document.createElement("div");
-      empty.className = "hint";
-      empty.textContent = "No substitutions configured yet.";
-      root.appendChild(empty);
-      return;
-    }
-    for (const rule of rules) {
-      root.appendChild(createRuleRow(ctx, rule));
-    }
-  }
-
-  function syncStringSubstituteContextFromSettings(ctx, settings) {
-    const visible = selectedPluginId(ctx) === STRING_PLUGIN;
-    const wrap = ctx.qs("plugins-string-substitute-settings");
-    wrap.style.display = visible ? "block" : "none";
-    if (!visible) {
-      return;
-    }
-
-    renderRuleRows(ctx, normalizeRules(settings));
-    updateSettingsJsonFromRuleUi(ctx);
-  }
-
-  function syncSettingsFromStringSubstituteContext(ctx, settings) {
-    if (selectedPluginId(ctx) !== STRING_PLUGIN) {
-      return settings;
-    }
-    return {
-      ...settings,
-      rules: readRulesFromUi(ctx),
-    };
-  }
-
-  function renderAlterations(ctx, rows) {
-    const root = ctx.qs("plugins-alterations");
-    root.innerHTML = "";
-
-    if (!Array.isArray(rows) || rows.length === 0) {
-      root.innerHTML = '<div class="scroll-item">No recorded alterations yet.</div>';
-      return;
-    }
-
-    for (const row of rows) {
-      root.appendChild(createAlterationRowElement(row));
-    }
-  }
-
-  function createAlterationRowElement(row) {
-    const div = document.createElement("div");
-    div.className = "scroll-item";
-    const when = row.unix_ms ? new Date(Number(row.unix_ms)).toLocaleTimeString() : "-";
-    div.innerHTML = `
-      <strong>${row.hook || "hook"}</strong> ${row.request_id || ""}<br>
-      <small>${when}</small><br>
-      <small>${row.summary || ""}</small>
-    `;
-    return div;
-  }
-
-  function prependAlteration(ctx, row) {
-    const root = ctx.qs("plugins-alterations");
-    if (root.children.length === 1 && root.textContent.includes("No recorded alterations yet.")) {
-      root.innerHTML = "";
-    }
-    root.prepend(createAlterationRowElement(row));
-    while (root.children.length > 300) {
-      root.removeChild(root.lastElementChild);
-    }
+  function getPluginUI(pluginId) {
+    return (window.RoxyPluginUI && window.RoxyPluginUI[pluginId]) || null;
   }
 
   async function loadPlugins(ctx) {
@@ -227,46 +50,90 @@
       select.value = current;
     } else if (preferred && rows.some((row) => row.name === preferred)) {
       select.value = preferred;
-    } else if (rows.some((row) => row.name === STRING_PLUGIN)) {
-      select.value = STRING_PLUGIN;
     } else {
       select.selectedIndex = 0;
     }
     window.__roxySelectedPlugin = select.value || "";
   }
 
+  async function loadPluginTemplate(ctx, pluginId) {
+    const container = ctx.qs("plugins-template-container");
+    container.innerHTML = "";
+    _loadedPluginTemplate = null;
+
+    if (!pluginId) {
+      container.innerHTML = '<p class="hint">Select a plugin to configure.</p>';
+      return;
+    }
+
+    try {
+      const html = await fetch(`/api/v1/plugins/${encodeURIComponent(pluginId)}/template/panel.html`);
+      if (!html.ok) {
+        container.innerHTML = '<p class="hint">No custom settings UI for this plugin.</p>';
+        return;
+      }
+      const htmlText = await html.text();
+      container.innerHTML = htmlText;
+
+      // Load and execute the plugin script if not already loaded.
+      if (!getPluginUI(pluginId)) {
+        try {
+          const jsResp = await fetch(`/api/v1/plugins/${encodeURIComponent(pluginId)}/template/script.js`);
+          if (jsResp.ok) {
+            const jsText = await jsResp.text();
+            const script = document.createElement("script");
+            script.textContent = jsText;
+            document.head.appendChild(script);
+          }
+        } catch (_) {
+          // Script is optional.
+        }
+      }
+
+      _loadedPluginTemplate = pluginId;
+    } catch (_) {
+      container.innerHTML = '<p class="hint">No custom settings UI for this plugin.</p>';
+    }
+  }
+
   async function loadSettings(ctx) {
     const pluginId = selectedPluginId(ctx);
+
+    // Load the plugin template if it changed.
+    if (_loadedPluginTemplate !== pluginId) {
+      await loadPluginTemplate(ctx, pluginId);
+    }
+
     if (!pluginId) {
-      ctx.qs("plugins-settings-json").value = "{}";
-      syncStringSubstituteContextFromSettings(ctx, {});
+      _settingsJson = "{}";
       return;
     }
 
     try {
       const settings = await ctx.api(`/plugins/${encodeURIComponent(pluginId)}/settings`);
-      ctx.qs("plugins-settings-json").value = JSON.stringify(settings || {}, null, 2);
-      syncStringSubstituteContextFromSettings(ctx, settings || {});
+      _settingsJson = JSON.stringify(settings || {}, null, 2);
+
+      // Initialize plugin UI with settings.
+      const ui = getPluginUI(pluginId);
+      const container = ctx.qs("plugins-template-container");
+      if (ui && ui.init) {
+        ui.init(container, settings || {}, ctx);
+      }
+      if (ui && ui.loadAlterations) {
+        ui.loadAlterations(container, pluginId, ctx);
+      }
     } catch (err) {
-      ctx.qs("plugins-settings-json").value = "{}";
-      syncStringSubstituteContextFromSettings(ctx, {});
+      _settingsJson = "{}";
       ctx.toast(`Load plugin settings failed: ${err.message}`);
     }
   }
 
   async function loadAlterations(ctx) {
     const pluginId = selectedPluginId(ctx);
-    if (!pluginId) {
-      renderAlterations(ctx, []);
-      return;
-    }
-
-    try {
-      const rows = await ctx.api(`/plugins/${encodeURIComponent(pluginId)}/alterations?limit=300`);
-      renderAlterations(ctx, rows);
-    } catch (err) {
-      renderAlterations(ctx, []);
-      ctx.toast(`Load alterations failed: ${err.message}`);
+    const ui = getPluginUI(pluginId);
+    if (ui && ui.loadAlterations) {
+      const container = ctx.qs("plugins-template-container");
+      ui.loadAlterations(container, pluginId, ctx);
     }
   }
 
@@ -277,23 +144,29 @@
       return;
     }
 
-    const input = ctx.qs("plugins-settings-json").value || "{}";
-    let settings = safeParseJson(input, null);
+    let settings = safeParseJson(_settingsJson, null);
     if (!settings) {
-      ctx.toast("Settings must be valid JSON object.");
-      return;
+      settings = {};
     }
 
-    settings = syncSettingsFromStringSubstituteContext(ctx, settings);
+    // Let the plugin UI merge its settings.
+    const ui = getPluginUI(pluginId);
+    if (ui && ui.readSettings) {
+      const container = ctx.qs("plugins-template-container");
+      settings = ui.readSettings(container, settings);
+    }
 
     try {
       await ctx.api(`/plugins/${encodeURIComponent(pluginId)}/settings`, {
         method: "PUT",
         body: JSON.stringify(settings),
       });
-      ctx.qs("plugins-settings-json").value = JSON.stringify(settings, null, 2);
+      _settingsJson = JSON.stringify(settings, null, 2);
       ctx.toast("Plugin settings saved");
-      await loadAlterations(ctx);
+      const savedUi = getPluginUI(pluginId);
+      if (savedUi && savedUi.loadAlterations) {
+        savedUi.loadAlterations(ctx.qs("plugins-template-container"), pluginId, ctx);
+      }
     } catch (err) {
       ctx.toast(`Save settings failed: ${err.message}`);
     }
@@ -317,37 +190,25 @@
     async init(ctx) {
       ctx.qs("plugins-refresh").addEventListener("click", async () => {
         await loadPlugins(ctx);
+        _loadedPluginTemplate = null;
         await loadSettings(ctx);
-        await loadAlterations(ctx);
       });
-      ctx.qs("plugins-refresh-alterations").addEventListener("click", () => loadAlterations(ctx));
       ctx.qs("plugins-select").addEventListener("change", async () => {
         window.__roxySelectedPlugin = selectedPluginId(ctx);
         if (window.__roxySelectedPlugin) {
           localStorage.setItem("roxy-selected-plugin-v1", window.__roxySelectedPlugin);
         }
+        _loadedPluginTemplate = null;
         await loadSettings(ctx);
-        await loadAlterations(ctx);
       });
       ctx.qs("plugins-save-settings").addEventListener("click", () => saveSettings(ctx));
-      ctx.qs("plugins-string-substitute-add-rule").addEventListener("click", () => {
-        const root = ctx.qs("plugins-string-substitute-rules");
-        const emptyHint = root.querySelector(".hint");
-        if (emptyHint) {
-          emptyHint.remove();
-        }
-        root.appendChild(createRuleRow(ctx));
-        updateSettingsJsonFromRuleUi(ctx);
-      });
 
       onSettingsLoaded(ctx);
       await loadPlugins(ctx);
       await loadSettings(ctx);
-      await loadAlterations(ctx);
     },
     async refresh(ctx) {
       await loadPlugins(ctx);
-      await loadAlterations(ctx);
     },
     refreshIntervalMs() {
       return 0;
@@ -358,16 +219,20 @@
       }
 
       if (event.event === "plugin_alteration_recorded" && event.payload) {
-        if (selectedPluginId(ctx) === event.payload.plugin) {
-          prependAlteration(ctx, event.payload);
+        const altPluginId = event.payload.plugin;
+        if (selectedPluginId(ctx) === altPluginId) {
+          const altUi = getPluginUI(altPluginId);
+          if (altUi && altUi.onRealtimeEvent) {
+            altUi.onRealtimeEvent(ctx.qs("plugins-template-container"), event, ctx);
+          }
         }
         return;
       }
 
       if (event.event === "plugin_registered" || event.event === "plugin_unregistered") {
         await loadPlugins(ctx);
+        _loadedPluginTemplate = null;
         await loadSettings(ctx);
-        await loadAlterations(ctx);
         return;
       }
 

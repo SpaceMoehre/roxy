@@ -405,6 +405,10 @@ pub async fn run_api_with_shutdown_and_ready(
                                 web::get().to(list_plugin_alterations),
                             )
                             .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
+                            .route(
+                                "/plugins/{id}/template/{file}",
+                                web::get().to(get_plugin_template),
+                            )
                             .route("/repeater/send", web::post().to(repeater_send))
                             .route("/decoder/transform", web::post().to(decode_transform))
                             .route("/intruder/jobs", web::post().to(intruder_create_job))
@@ -558,6 +562,10 @@ pub async fn run_api_with_shutdown_and_ready_uds(
                             web::get().to(list_plugin_alterations),
                         )
                         .route("/plugins/{id}/invoke", web::post().to(invoke_plugin))
+                        .route(
+                            "/plugins/{id}/template/{file}",
+                            web::get().to(get_plugin_template),
+                        )
                         .route("/repeater/send", web::post().to(repeater_send))
                         .route("/decoder/transform", web::post().to(decode_transform))
                         .route("/intruder/jobs", web::post().to(intruder_create_job))
@@ -1106,6 +1114,54 @@ async fn invoke_plugin(
             }))
         }
         Err(err) => json_error(HttpResponse::BadRequest(), &err.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct PluginTemplatePath {
+    id: String,
+    file: String,
+}
+
+async fn get_plugin_template(
+    state: web::types::State<ApiState>,
+    path: web::types::Path<PluginTemplatePath>,
+) -> HttpResponse {
+    let allowed_files = ["panel.html", "script.js", "settings.html"];
+    if !allowed_files.contains(&path.file.as_str()) {
+        return json_error(
+            HttpResponse::BadRequest(),
+            "only panel.html, script.js, and settings.html are allowed",
+        );
+    }
+
+    let registration = match state.plugins.get_registration(&path.id).await {
+        Some(reg) => reg,
+        None => return HttpResponse::NotFound().finish(),
+    };
+
+    let template_dir = registration
+        .script_path
+        .parent()
+        .map(|p| p.join("templates"));
+
+    let template_path = match template_dir {
+        Some(dir) => dir.join(&path.file),
+        None => return HttpResponse::NotFound().finish(),
+    };
+
+    match tokio::fs::read_to_string(&template_path).await {
+        Ok(content) => {
+            let content_type = if path.file.ends_with(".html") {
+                "text/html; charset=utf-8"
+            } else {
+                "application/javascript; charset=utf-8"
+            };
+            HttpResponse::Ok()
+                .header("content-type", content_type)
+                .body(content)
+        }
+        Err(_) => HttpResponse::NotFound().finish(),
     }
 }
 
