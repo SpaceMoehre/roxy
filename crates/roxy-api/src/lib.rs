@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
-use ntex::web::{self, HttpResponse};
+use ntex::web::{self, HttpRequest, HttpResponse};
 use roxy_core::{
     AppState, CertManager, InterceptDecision, IntruderJobSpec, IntruderManager, ParsedRequestBlob,
     RequestMutation, ResponseInterceptDecision, ResponseMutation, UpstreamProxySettings,
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tera::{Context as TeraContext, Tera};
 use tokio::sync::{oneshot, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::ws::WsHub;
@@ -612,7 +612,18 @@ fn render_app_js(state: &ApiState) -> Result<String> {
     Tera::one_off(APP_TEMPLATE, &context, false).context("failed rendering app template")
 }
 
-async fn index(state: web::types::State<ApiState>) -> HttpResponse {
+fn log_web_ui_request(req: &HttpRequest, asset: &str) {
+    debug!(
+        asset,
+        method = %req.method(),
+        path = %req.path(),
+        peer = ?req.peer_addr(),
+        "ntex web ui request received"
+    );
+}
+
+async fn index(req: HttpRequest, state: web::types::State<ApiState>) -> HttpResponse {
+    log_web_ui_request(&req, "index");
     match render_index_html(&state) {
         Ok(html) => HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
@@ -628,7 +639,8 @@ async fn index(state: web::types::State<ApiState>) -> HttpResponse {
     }
 }
 
-async fn app_js(state: web::types::State<ApiState>) -> HttpResponse {
+async fn app_js(req: HttpRequest, state: web::types::State<ApiState>) -> HttpResponse {
+    log_web_ui_request(&req, "app.js");
     match render_app_js(&state) {
         Ok(js) => HttpResponse::Ok()
             .content_type("application/javascript; charset=utf-8")
@@ -644,7 +656,8 @@ async fn app_js(state: web::types::State<ApiState>) -> HttpResponse {
     }
 }
 
-async fn styles_css() -> HttpResponse {
+async fn styles_css(req: HttpRequest) -> HttpResponse {
+    log_web_ui_request(&req, "styles.css");
     HttpResponse::Ok()
         .content_type("text/css; charset=utf-8")
         .set_header("cache-control", "no-store")

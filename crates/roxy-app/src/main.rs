@@ -25,11 +25,11 @@ use roxy_storage::StorageManager;
 use serde_json::Value;
 use tokio::{
     io::copy_bidirectional,
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::{mpsc, watch},
     time::timeout,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CliOptions {
@@ -462,13 +462,20 @@ async fn run_ingress_with_shutdown(
                 }
             }
             accepted = listener.accept() => {
-                let (stream, peer) = accepted.context("ingress accept failed")?;
-                let targets = targets.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = route_ingress_stream(stream, peer, targets).await {
-                        warn!(%err, %peer, "ingress stream routing failed");
+                match accepted {
+                    Ok((stream, peer)) => {
+                        let targets = targets.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = route_ingress_stream(stream, peer, targets).await {
+                                warn!(%err, %peer, "ingress stream routing failed");
+                            }
+                        });
                     }
-                });
+                    Err(err) => {
+                        warn!(%err, "ingress accept failed; continuing");
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
             }
         }
     }
@@ -482,6 +489,7 @@ async fn route_ingress_stream(
     targets: IngressTargets,
 ) -> Result<()> {
     let route = detect_ingress_route(&stream).await;
+    debug!(%peer, ?route, "ingress route selected");
     match route {
         IngressRoute::Proxy => targets.proxy.serve_stream(stream, peer).await,
         IngressRoute::Api => tunnel_to_uds(stream, &targets.api_uds).await,
@@ -501,9 +509,57 @@ async fn tunnel_to_uds(mut stream: TcpStream, path: &Path) -> Result<()> {
 
 async fn detect_ingress_route(stream: &TcpStream) -> IngressRoute {
     let mut buf = [0_u8; 2048];
-    match timeout(Duration::from_millis(300), stream.peek(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => classify_ingress_route(&buf[..n]),
-        _ => IngressRoute::Proxy,
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            debug!("ingress route detect timed out waiting for request bytes; defaulting to Api");
+            return IngressRoute::Api;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        match timeout(remaining, stream.peek(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                let data = &buf[..n];
+                if data.contains(&b'\n') || n == buf.len() {
+                    let route = classify_ingress_route(data);
+                    debug!(
+                        ?route,
+                        preview = %ingress_request_line_preview(data),
+                        bytes_peeked = n,
+                        "ingress route classified from request bytes"
+                    );
+                    return route;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Ok(Err(err)) => {
+                debug!(%err, "ingress route detect peek failed; defaulting to Api");
+                return IngressRoute::Api;
+            }
+            Err(_) => {
+                debug!("ingress route detect wait timed out; defaulting to Api");
+                return IngressRoute::Api;
+            }
+        }
+    }
+}
+
+fn ingress_request_line_preview(buffer: &[u8]) -> String {
+    let line = String::from_utf8_lossy(buffer)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('\r')
+        .chars()
+        .take(160)
+        .collect::<String>();
+    if line.is_empty() {
+        "<empty>".to_string()
+    } else {
+        line
     }
 }
 
@@ -559,9 +615,10 @@ fn is_websocket_upgrade(buffer: &[u8]) -> bool {
 }
 
 async fn bind_available_tcp_listener(start: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
+    const INGRESS_LISTEN_BACKLOG: u32 = 2048;
     let mut addr = start;
     loop {
-        match TcpListener::bind(addr).await {
+        match bind_tcp_listener_with_backlog(addr, INGRESS_LISTEN_BACKLOG) {
             Ok(listener) => return Ok((listener, addr)),
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
                 addr = increment_port(addr)?;
@@ -569,6 +626,17 @@ async fn bind_available_tcp_listener(start: SocketAddr) -> io::Result<(TcpListen
             Err(err) => return Err(err),
         }
     }
+}
+
+fn bind_tcp_listener_with_backlog(addr: SocketAddr, backlog: u32) -> io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(backlog)
 }
 
 fn init_tracing(debug_logging_enabled: bool) {
@@ -990,14 +1058,18 @@ fn now_unix_ms_local() -> u128 {
 mod tests {
     use bytes::Bytes;
     use roxy_core::model::now_unix_ms;
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, time::Duration};
     use tempfile::tempdir;
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
     use uuid::Uuid;
 
     use super::{
         AppState, CapturedRequest, CapturedResponse, IngressRoute, UiModuleRegistry,
         apply_plugin_output_ops, apply_request_middleware_output, apply_response_middleware_output,
-        classify_ingress_route, discover_plugin_scripts, parse_bool_env_value,
+        classify_ingress_route, detect_ingress_route, discover_plugin_scripts, parse_bool_env_value,
         parse_cli_options_from_args,
     };
 
@@ -1056,6 +1128,27 @@ mod tests {
     fn classify_ingress_relative_path_routes_to_api() {
         let data = b"GET /api/v1/health HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
         assert_eq!(classify_ingress_route(data), IngressRoute::Api);
+    }
+
+    #[tokio::test]
+    async fn detect_ingress_route_waits_for_slow_request_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.expect("connect");
+            tokio::time::sleep(Duration::from_millis(3200)).await;
+            stream
+                .write_all(b"GET /app.js HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n")
+                .await
+                .expect("write request");
+        });
+
+        let (server_stream, _) = listener.accept().await.expect("accept stream");
+        let route = detect_ingress_route(&server_stream).await;
+        assert_eq!(route, IngressRoute::Api);
+
+        client.await.expect("client join");
     }
 
     #[test]
