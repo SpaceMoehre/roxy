@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/simonsan/roxy/actions"><img src="https://img.shields.io/github/actions/workflow/status/simonsan/roxy/ci-release.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="https://github.com/SpaceMoehre/roxy/actions"><img src="https://img.shields.io/github/actions/workflow/status/SpaceMoehre/roxy/ci-release.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.89+-orange?style=flat-square&logo=rust" alt="Rust"></a>
   <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"></a>
@@ -42,7 +42,7 @@ Most proxy tools are built on legacy stacks. **Roxy** is a ground-up Rust implem
 
 ```bash
 # Clone & run
-git clone https://github.com/simonsan/roxy.git && cd roxy
+git clone https://github.com/SpaceMoehre/roxy.git && cd roxy
 cargo run -p roxy
 ```
 
