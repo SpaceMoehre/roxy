@@ -37,7 +37,8 @@ use tokio_boring::connect as tls_connect;
 use tracing::debug;
 
 use roxy_tls::{
-    apply_ech_client_config, client_connector as tls_connector, ech_retry_from_handshake_error,
+    apply_ech_client_config, client_connector as tls_connector, client_connector_h1_only,
+    ech_retry_from_handshake_error,
 };
 
 use crate::raw_http::ParsedRequestBlob;
@@ -146,7 +147,7 @@ pub async fn send_parsed_request(
                 selected_alpn = ?tls_stream.ssl().selected_alpn_protocol(),
                 "outbound TLS handshake completed"
             );
-            return send_http_request_over_stream(
+            let h2_result = send_http_request_over_stream(
                 tls_stream,
                 &parsed_request,
                 &uri,
@@ -154,6 +155,49 @@ pub async fn send_parsed_request(
                 use_h2,
             )
             .await;
+
+            // If the HTTP/2 request failed, retry with an HTTP/1.1-only
+            // connection so a single protocol error does not break outbound
+            // requests.
+            if use_h2 && h2_result.is_err() {
+                let h2_err = h2_result.unwrap_err();
+                debug!(
+                    %host,
+                    error = %h2_err,
+                    "outbound HTTP/2 request failed; retrying with HTTP/1.1"
+                );
+                let retry_stream =
+                    TcpStream::connect(&authority).await.with_context(|| {
+                        format!(
+                            "failed reconnecting to upstream authority {authority} for HTTP/1.1 retry"
+                        )
+                    })?;
+                let h1_connector = client_connector_h1_only(accept_invalid_certs);
+                let mut h1_tls_config = h1_connector
+                    .configure()
+                    .context("failed preparing outbound h1-only TLS connector")?;
+                if accept_invalid_certs {
+                    h1_tls_config.set_verify_hostname(false);
+                }
+                apply_ech_client_config(&mut h1_tls_config, host, None).await;
+                let h1_tls_stream = tls_connect(h1_tls_config, host, retry_stream)
+                    .await
+                    .map_err(|err| {
+                        anyhow!(
+                            "TLS handshake to upstream host '{host}' failed on HTTP/1.1 retry: {err}"
+                        )
+                    })?;
+                return send_http_request_over_stream(
+                    h1_tls_stream,
+                    &parsed_request,
+                    &uri,
+                    &authority,
+                    false,
+                )
+                .await;
+            }
+
+            return h2_result;
         }
 
         send_http_request_over_stream(stream, &parsed_request, &uri, &authority, false).await
@@ -196,6 +240,10 @@ where
             continue;
         };
         if name == CONTENT_LENGTH {
+            continue;
+        }
+        // RFC 9113 §8.2.2: connection-specific headers MUST NOT appear in HTTP/2.
+        if use_h2 && is_h2_connection_specific_header(&header.name, &header.value) {
             continue;
         }
         if name == HOST {
@@ -272,6 +320,24 @@ where
         headers,
         body,
     })
+}
+
+/// Returns `true` if the header is an HTTP/1.1 connection-specific header
+/// that MUST NOT be forwarded in HTTP/2 (RFC 9113 §8.2.2).
+fn is_h2_connection_specific_header(name: &str, value: &str) -> bool {
+    if name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
+    {
+        return true;
+    }
+    // TE is allowed in HTTP/2 only when its value is exactly "trailers".
+    if name.eq_ignore_ascii_case("te") && !value.trim().eq_ignore_ascii_case("trailers") {
+        return true;
+    }
+    false
 }
 
 /// Extracts `host:port` from a URI, defaulting to port 443 for `https` and

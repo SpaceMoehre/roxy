@@ -56,7 +56,8 @@ use uuid::Uuid;
 
 use roxy_tls::{
     apply_ech_client_config, build_downstream_mitm_acceptor,
-    client_connector as upstream_tls_connector, ech_retry_from_handshake_error,
+    client_connector as upstream_tls_connector, client_connector_h1_only,
+    ech_retry_from_handshake_error,
 };
 
 use crate::{
@@ -505,7 +506,7 @@ impl ProxyEngine {
                     selected_alpn = ?tls_stream.ssl().selected_alpn_protocol(),
                     "upstream TLS handshake completed"
                 );
-                return send_http_request_over_stream(
+                let h2_result = send_http_request_over_stream(
                     tls_stream,
                     parsed_request,
                     &uri,
@@ -513,6 +514,49 @@ impl ProxyEngine {
                     use_h2,
                 )
                 .await;
+
+                // If the HTTP/2 request failed, retry with an HTTP/1.1-only
+                // connection so that a single protocol error does not take down
+                // all HTTPS traffic through the proxy.
+                if use_h2 && h2_result.is_err() {
+                    let h2_err = h2_result.unwrap_err();
+                    warn!(
+                        request_id = %request_id,
+                        %host,
+                        error = %h2_err,
+                        "upstream HTTP/2 request failed; retrying with HTTP/1.1"
+                    );
+                    let retry_stream =
+                        dial_via_upstream_chain(&authority, &chain, settings.proxy_dns)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed reconnecting upstream chain for HTTP/1.1 retry authority={authority}"
+                                )
+                            })?;
+                    let h1_connector = client_connector_h1_only(false);
+                    let mut h1_tls_config = h1_connector
+                        .configure()
+                        .context("failed preparing upstream h1-only TLS connector")?;
+                    apply_ech_client_config(&mut h1_tls_config, host, None).await;
+                    let h1_tls_stream = tls_connect(h1_tls_config, host, retry_stream)
+                        .await
+                        .map_err(|err| {
+                            anyhow!(
+                                "TLS handshake to upstream host '{host}' failed on HTTP/1.1 retry: {err}"
+                            )
+                        })?;
+                    return send_http_request_over_stream(
+                        h1_tls_stream,
+                        parsed_request,
+                        &uri,
+                        &authority,
+                        false,
+                    )
+                    .await;
+                }
+
+                return h2_result;
             }
 
             send_http_request_over_stream(stream, parsed_request, &uri, &authority, false).await
@@ -1029,6 +1073,10 @@ where
         if header.name.eq_ignore_ascii_case("content-length")
             || header.name.eq_ignore_ascii_case("proxy-connection")
         {
+            continue;
+        }
+        // RFC 9113 §8.2.2: connection-specific headers MUST NOT appear in HTTP/2.
+        if use_h2 && is_h2_connection_specific_header(&header.name, &header.value) {
             continue;
         }
 
@@ -1633,6 +1681,24 @@ fn format_body_preview(bytes: &[u8], max_bytes: usize) -> String {
     }
 
     out
+}
+
+/// Returns `true` if the header is an HTTP/1.1 connection-specific header
+/// that MUST NOT be forwarded in HTTP/2 (RFC 9113 §8.2.2).
+fn is_h2_connection_specific_header(name: &str, value: &str) -> bool {
+    if name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
+    {
+        return true;
+    }
+    // TE is allowed in HTTP/2 only when its value is exactly "trailers".
+    if name.eq_ignore_ascii_case("te") && !value.trim().eq_ignore_ascii_case("trailers") {
+        return true;
+    }
+    false
 }
 
 fn format_error_chain(err: &anyhow::Error) -> String {

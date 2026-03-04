@@ -41,7 +41,29 @@ pub fn client_connector(accept_invalid_certs: bool) -> Arc<SslConnector> {
     }
 }
 
+/// Returns a shared [`SslConnector`] that only advertises HTTP/1.1
+/// during ALPN negotiation, suitable for retrying requests that
+/// failed over HTTP/2 with a protocol error.
+pub fn client_connector_h1_only(accept_invalid_certs: bool) -> Arc<SslConnector> {
+    static STRICT_H1: OnceLock<Arc<SslConnector>> = OnceLock::new();
+    static INSECURE_H1: OnceLock<Arc<SslConnector>> = OnceLock::new();
+
+    if accept_invalid_certs {
+        INSECURE_H1
+            .get_or_init(|| Arc::new(build_client_connector_impl(true, false)))
+            .clone()
+    } else {
+        STRICT_H1
+            .get_or_init(|| Arc::new(build_client_connector_impl(false, false)))
+            .clone()
+    }
+}
+
 fn build_client_connector(accept_invalid_certs: bool) -> SslConnector {
+    build_client_connector_impl(accept_invalid_certs, true)
+}
+
+fn build_client_connector_impl(accept_invalid_certs: bool, enable_h2: bool) -> SslConnector {
     let mut builder =
         SslConnector::builder(SslMethod::tls_client()).expect("failed building TLS connector");
     builder
@@ -75,8 +97,13 @@ fn build_client_connector(accept_invalid_certs: bool) -> SslConnector {
     } else {
         SslVerifyMode::PEER
     });
+    let alpn = if enable_h2 {
+        &b"\x02h2\x08http/1.1"[..]
+    } else {
+        &b"\x08http/1.1"[..]
+    };
     builder
-        .set_alpn_protos(b"\x02h2\x08http/1.1")
+        .set_alpn_protos(alpn)
         .expect("failed configuring TLS ALPN protocol list");
     builder.build()
 }

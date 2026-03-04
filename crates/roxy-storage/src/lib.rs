@@ -23,6 +23,7 @@ use tantivy::{
     schema::{Field, STORED, STRING, Schema, TEXT, Value},
 };
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::{Duration, interval};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -110,6 +111,11 @@ impl StorageManager {
     /// Spawns a Tokio task that reads [`CapturedExchange`]s from the
     /// channel and persists each one.
     ///
+    /// Exchanges are written to sled and added to the tantivy index
+    /// immediately, but the expensive tantivy commit and sled flush
+    /// are batched — they run at most once every 5 seconds when there
+    /// are pending writes.
+    ///
     /// Returns the task handle so the caller can await clean shutdown.
     pub fn spawn_ingestor(
         &self,
@@ -117,12 +123,88 @@ impl StorageManager {
     ) -> tokio::task::JoinHandle<()> {
         let manager = self.clone();
         tokio::spawn(async move {
-            while let Some(exchange) = rx.recv().await {
-                if let Err(err) = manager.persist_exchange(&exchange).await {
-                    error!(%err, "failed persisting exchange");
+            let mut dirty = false;
+            let mut tick = interval(Duration::from_secs(5));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    maybe = rx.recv() => {
+                        match maybe {
+                            Some(exchange) => {
+                                if let Err(err) = manager.index_exchange(&exchange).await {
+                                    error!(%err, "failed persisting exchange");
+                                } else {
+                                    dirty = true;
+                                }
+                            }
+                            None => {
+                                // Channel closed — final commit & exit.
+                                if dirty {
+                                    if let Err(err) = manager.commit_pending().await {
+                                        error!(%err, "final storage commit failed");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    _ = tick.tick() => {
+                        if dirty {
+                            if let Err(err) = manager.commit_pending().await {
+                                error!(%err, "periodic storage commit failed");
+                            }
+                            dirty = false;
+                        }
+                    }
                 }
             }
         })
+    }
+
+    /// Writes an exchange to sled and adds it to the tantivy index
+    /// **without** committing.  The commit is handled by the batching
+    /// logic in [`spawn_ingestor`].
+    async fn index_exchange(&self, exchange: &CapturedExchange) -> Result<()> {
+        let id = exchange.request.id;
+        let key = id.as_bytes();
+        let payload = serde_json::to_vec(exchange).context("failed serializing exchange")?;
+        self.inner
+            .db
+            .insert(key, payload)
+            .context("failed writing exchange to sled")?;
+
+        let request_blob = String::from_utf8_lossy(exchange.request.raw.as_ref()).to_string();
+        let response_blob = exchange
+            .response
+            .as_ref()
+            .map(build_response_blob_text)
+            .unwrap_or_default();
+
+        let writer = self.inner.index_writer.lock().await;
+        writer.add_document(doc!(
+            self.inner.fields.id => id.to_string(),
+            self.inner.fields.method => exchange.request.method.clone(),
+            self.inner.fields.host => exchange.request.host.clone(),
+            self.inner.fields.uri => exchange.request.uri.clone(),
+            self.inner.fields.request_body => request_blob,
+            self.inner.fields.response_body => response_blob,
+        ))?;
+        Ok(())
+    }
+
+    /// Commits the tantivy index and flushes sled to disk.
+    async fn commit_pending(&self) -> Result<()> {
+        let mut writer = self.inner.index_writer.lock().await;
+        writer.commit().context("tantivy commit failed")?;
+        self.inner
+            .db
+            .flush()
+            .context("failed flushing sled database")?;
+        Ok(())
     }
 
     /// Writes an exchange to sled and adds it to the tantivy index.
