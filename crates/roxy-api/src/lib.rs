@@ -85,6 +85,7 @@ const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../web/icons/apple-touch-ico
 const ANDROID_CHROME_192_PNG: &[u8] = include_bytes!("../web/icons/android-chrome-192x192.png");
 const ANDROID_CHROME_512_PNG: &[u8] = include_bytes!("../web/icons/android-chrome-512x512.png");
 const MSTILE_150_PNG: &[u8] = include_bytes!("../web/icons/mstile-150x150.png");
+const DEFAULT_API_WORKERS: usize = 4;
 
 #[derive(Clone)]
 /// Shared application state threaded through every API handler.
@@ -423,13 +424,35 @@ pub async fn run_api_with_shutdown(
 pub async fn run_api_with_shutdown_and_ready(
     bind: SocketAddr,
     state: ApiState,
+    shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<SocketAddr>>,
+) -> std::io::Result<()> {
+    run_api_with_shutdown_and_ready_with_workers(
+        bind,
+        state,
+        shutdown,
+        ready,
+        Some(DEFAULT_API_WORKERS),
+    )
+    .await
+}
+
+/// Starts the HTTP API server on a TCP socket with shutdown/readiness support
+/// and an optional explicit worker count.
+///
+/// Passing `workers = None` keeps ntex defaults (equivalent to not calling
+/// `HttpServer::workers`).
+pub async fn run_api_with_shutdown_and_ready_with_workers(
+    bind: SocketAddr,
+    state: ApiState,
     mut shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<SocketAddr>>,
+    workers: Option<usize>,
 ) -> std::io::Result<()> {
     let mut bind_addr = bind;
     let mut ready = ready;
     loop {
-        let server = web::HttpServer::new({
+        let mut server = web::HttpServer::new({
             let state = state.clone();
             move || {
                 web::App::new()
@@ -544,6 +567,9 @@ pub async fn run_api_with_shutdown_and_ready(
             }
         })
         .disable_signals();
+        if let Some(worker_count) = workers {
+            server = server.workers(worker_count);
+        }
 
         match server.bind(bind_addr) {
             Ok(server) => {
@@ -584,13 +610,35 @@ pub async fn run_api_with_shutdown_and_ready(
 pub async fn run_api_with_shutdown_and_ready_uds(
     path: impl AsRef<Path>,
     state: ApiState,
+    shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<PathBuf>>,
+) -> std::io::Result<()> {
+    run_api_with_shutdown_and_ready_uds_with_workers(
+        path,
+        state,
+        shutdown,
+        ready,
+        Some(DEFAULT_API_WORKERS),
+    )
+    .await
+}
+
+/// Starts the HTTP API server on a Unix domain socket with shutdown/readiness
+/// support and an optional explicit worker count.
+///
+/// Passing `workers = None` keeps ntex defaults (equivalent to not calling
+/// `HttpServer::workers`).
+pub async fn run_api_with_shutdown_and_ready_uds_with_workers(
+    path: impl AsRef<Path>,
+    state: ApiState,
     mut shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<PathBuf>>,
+    workers: Option<usize>,
 ) -> std::io::Result<()> {
     let path = path.as_ref().to_path_buf();
     cleanup_uds_socket_path(&path)?;
 
-    let server = web::HttpServer::new({
+    let mut server = web::HttpServer::new({
         let state = state.clone();
         move || {
             web::App::new()
@@ -705,6 +753,9 @@ pub async fn run_api_with_shutdown_and_ready_uds(
         }
     })
     .disable_signals();
+    if let Some(worker_count) = workers {
+        server = server.workers(worker_count);
+    }
 
     let server = server.bind_uds(&path)?;
     if let Some(tx) = ready {

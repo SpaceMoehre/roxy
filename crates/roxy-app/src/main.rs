@@ -29,6 +29,7 @@
 //! | `ROXY_DEBUG_LOGGING` | `false` | Enable verbose proxy tracing |
 //! | `ROXY_DEBUG_LOG_BODIES` | `false` | Include body previews in traces |
 //! | `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes per body preview |
+//! | `ROXY_API_WORKERS` | `4` | API ntex workers (`max` = let ntex choose) |
 
 use std::{
     env, fs, io,
@@ -42,7 +43,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use roxy_api::{
-    ApiState, run_api_with_shutdown_and_ready_uds,
+    ApiState, run_api_with_shutdown_and_ready_uds_with_workers,
     web_modules::{UiModule, UiModuleRegistry},
     ws::{WsHub, run_ws_server_with_shutdown_and_ready_uds},
 };
@@ -63,9 +64,27 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+const DEFAULT_API_WORKERS: usize = 4;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CliOptions {
     debug: bool,
+    api_workers: Option<ApiWorkerSelection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApiWorkerSelection {
+    Max,
+    Fixed(usize),
+}
+
+impl ApiWorkerSelection {
+    fn as_ntex_workers(self) -> Option<usize> {
+        match self {
+            Self::Max => None,
+            Self::Fixed(workers) => Some(workers),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -230,6 +249,10 @@ async fn main() -> Result<()> {
     let debug_logging_enabled = cli.debug || read_bool_env("ROXY_DEBUG_LOGGING", false)?;
     let debug_log_bodies = read_bool_env("ROXY_DEBUG_LOG_BODIES", false)?;
     let debug_log_body_limit = read_usize_env("ROXY_DEBUG_LOG_BODY_LIMIT", 2048)?;
+    let api_workers = resolve_api_workers(cli.api_workers)?;
+    let api_workers_log = api_workers
+        .map(|workers| workers.to_string())
+        .unwrap_or_else(|| "max".to_string());
     init_tracing(debug_logging_enabled);
 
     let bind = read_addr_env("ROXY_BIND", "127.0.0.1:8080")?;
@@ -383,8 +406,14 @@ async fn main() -> Result<()> {
     let mut api_task = tokio::task::spawn_blocking(move || {
         let runner = ntex::rt::System::new("roxy-api");
         runner.block_on(async move {
-            run_api_with_shutdown_and_ready_uds(api_uds_for_server, api_state, api_shutdown, None)
-                .await
+            run_api_with_shutdown_and_ready_uds_with_workers(
+                api_uds_for_server,
+                api_state,
+                api_shutdown,
+                None,
+                api_workers,
+            )
+            .await
         })
     });
 
@@ -415,6 +444,7 @@ async fn main() -> Result<()> {
         debug_logging_enabled,
         debug_log_bodies,
         debug_log_body_limit,
+        api_workers = %api_workers_log,
         "roxy started"
     );
 
@@ -693,19 +723,66 @@ where
     I: IntoIterator<Item = String>,
 {
     let mut options = CliOptions::default();
-    for arg in args {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--debug" => {
                 options.debug = true;
             }
+            "--workers" | "--api-workers" => {
+                let value = args.next().ok_or_else(|| {
+                    anyhow!(
+                        "missing value for {}. expected a positive integer or 'max'",
+                        arg
+                    )
+                })?;
+                options.api_workers = Some(parse_api_worker_value(&arg, &value)?);
+            }
+            _ if arg.starts_with("--workers=") => {
+                let (_, value) = arg.split_once('=').expect("starts_with ensures '='");
+                options.api_workers = Some(parse_api_worker_value("--workers", value)?);
+            }
+            _ if arg.starts_with("--api-workers=") => {
+                let (_, value) = arg.split_once('=').expect("starts_with ensures '='");
+                options.api_workers = Some(parse_api_worker_value("--api-workers", value)?);
+            }
             unknown => {
                 return Err(anyhow!(
-                    "unknown argument '{unknown}'. supported flags: --debug"
+                    "unknown argument '{unknown}'. supported flags: --debug, --workers <N|max>, --workers=<N|max>, --api-workers <N|max>, --api-workers=<N|max>"
                 ));
             }
         }
     }
     Ok(options)
+}
+
+fn parse_api_worker_value(source: &str, value: &str) -> Result<ApiWorkerSelection> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == "max" {
+        return Ok(ApiWorkerSelection::Max);
+    }
+
+    let workers = normalized.parse::<usize>().with_context(|| {
+        format!("invalid worker count in {source}: '{value}' (expected positive integer or 'max')")
+    })?;
+    if workers == 0 {
+        return Err(anyhow!(
+            "invalid worker count in {source}: '{value}' (must be >= 1 or 'max')"
+        ));
+    }
+    Ok(ApiWorkerSelection::Fixed(workers))
+}
+
+fn resolve_api_workers(cli_override: Option<ApiWorkerSelection>) -> Result<Option<usize>> {
+    if let Some(selection) = cli_override {
+        return Ok(selection.as_ntex_workers());
+    }
+
+    match env::var("ROXY_API_WORKERS") {
+        Ok(value) => Ok(parse_api_worker_value("ROXY_API_WORKERS", &value)?.as_ntex_workers()),
+        Err(env::VarError::NotPresent) => Ok(Some(DEFAULT_API_WORKERS)),
+        Err(err) => Err(anyhow!("failed reading ROXY_API_WORKERS: {err}")),
+    }
 }
 
 fn read_addr_env(key: &str, default: &str) -> Result<SocketAddr> {
@@ -1144,10 +1221,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, CapturedRequest, CapturedResponse, IngressRoute, UiModuleRegistry,
-        apply_plugin_output_ops, apply_request_middleware_output, apply_response_middleware_output,
-        classify_ingress_route, detect_ingress_route, discover_plugin_scripts,
-        parse_bool_env_value, parse_cli_options_from_args,
+        ApiWorkerSelection, AppState, CapturedRequest, CapturedResponse, IngressRoute,
+        UiModuleRegistry, apply_plugin_output_ops, apply_request_middleware_output,
+        apply_response_middleware_output, classify_ingress_route, detect_ingress_route,
+        discover_plugin_scripts, parse_api_worker_value, parse_bool_env_value,
+        parse_cli_options_from_args,
     };
 
     #[test]
@@ -1178,9 +1256,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_options_accepts_workers_equals_syntax() {
+        let opts = parse_cli_options_from_args(vec!["--workers=9".to_string()])
+            .expect("parse should work");
+        assert_eq!(opts.api_workers, Some(ApiWorkerSelection::Fixed(9)));
+    }
+
+    #[test]
+    fn parse_cli_options_accepts_api_workers_space_syntax() {
+        let opts =
+            parse_cli_options_from_args(vec!["--api-workers".to_string(), "max".to_string()])
+                .expect("parse should work");
+        assert_eq!(opts.api_workers, Some(ApiWorkerSelection::Max));
+    }
+
+    #[test]
     fn parse_cli_options_rejects_unknown_flag() {
         let err = parse_cli_options_from_args(vec!["--wat".to_string()]).expect_err("should fail");
         assert!(err.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn parse_api_worker_value_accepts_max_case_insensitive() {
+        assert_eq!(
+            parse_api_worker_value("TEST", " Max ").expect("valid worker value"),
+            ApiWorkerSelection::Max
+        );
+    }
+
+    #[test]
+    fn parse_api_worker_value_rejects_zero() {
+        let err = parse_api_worker_value("TEST", "0").expect_err("zero should fail");
+        assert!(err.to_string().contains("must be >= 1"));
     }
 
     #[test]

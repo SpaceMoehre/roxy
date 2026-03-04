@@ -120,6 +120,7 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `ROXY_DEBUG_LOGGING` | `false` | Verbose proxy debug logs |
 | `ROXY_DEBUG_LOG_BODIES` | `false` | Include body previews in debug output |
 | `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes per body preview |
+| `ROXY_API_WORKERS` | `4` | API ntex workers (`max` skips explicit `.workers()`) |
 | `ROXY_ECH_ENABLED` | `true` | Encrypted Client Hello |
 | `ROXY_ECH_GREASE` | `true` | ECH GREASE when no config available |
 | `ROXY_ECH_CONFIG_LIST_BASE64` | — | Optional base64 `ECHConfigList` override |
@@ -127,6 +128,9 @@ All configuration is via environment variables. Sensible defaults are provided.
 ```bash
 # Debug mode example
 ROXY_DEBUG_LOGGING=true RUST_LOG=debug cargo run -p roxy -- --debug
+
+# Let ntex choose max workers for the API server
+cargo run -p roxy -- --workers max
 ```
 
 ---
