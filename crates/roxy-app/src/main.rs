@@ -288,13 +288,13 @@ async fn main() -> Result<()> {
 
     let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope>(4096);
     let (storage_tx, storage_rx) = mpsc::channel(4096);
-    let _storage_task = storage.spawn_ingestor(storage_rx);
+    let storage_task = storage.spawn_ingestor(storage_rx);
 
     let plugins_for_loop = plugins.clone();
     let ws_hub_for_loop = ws_hub.clone();
     let app_state_for_plugins = app_state.clone();
     let ui_modules_for_plugins = ui_modules.clone();
-    let _event_dispatch = tokio::spawn(async move {
+    let event_dispatch = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             let EventEnvelope::Exchange(exchange) = &event;
             if let Err(err) = storage_tx.send(exchange.clone()).await {
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
 
     let mut intruder_events = intruder.subscribe_events();
     let ws_hub_intruder = ws_hub.clone();
-    let _intruder_event_dispatch = tokio::spawn(async move {
+    let intruder_event_dispatch = tokio::spawn(async move {
         while let Ok(event) = intruder_events.recv().await {
             ws_hub_intruder.publish(&event);
         }
@@ -330,7 +330,7 @@ async fn main() -> Result<()> {
 
     let mut plugin_events = plugins.subscribe_events();
     let ws_hub_plugins = ws_hub.clone();
-    let _plugin_event_dispatch = tokio::spawn(async move {
+    let plugin_event_dispatch = tokio::spawn(async move {
         while let Ok(event) = plugin_events.recv().await {
             match event {
                 PluginManagerEvent::PluginRegistered(_)
@@ -345,7 +345,7 @@ async fn main() -> Result<()> {
 
     let mut app_state_events = app_state.subscribe_events();
     let ws_hub_state = ws_hub.clone();
-    let _app_state_event_dispatch = tokio::spawn(async move {
+    let app_state_event_dispatch = tokio::spawn(async move {
         while let Ok(event) = app_state_events.recv().await {
             match event {
                 AppStateEvent::ProxyToggles(_)
@@ -478,19 +478,39 @@ async fn main() -> Result<()> {
     if ctrl_c_triggered {
         let _ = shutdown_tx.send(true);
 
+        // Wait for the three listener tasks to finish (they stop their
+        // accept loops when the shutdown watch fires).
         let graceful = timeout(Duration::from_secs(5), async {
+            let _ = (&mut ingress_task).await;
             let _ = (&mut ws_task).await;
             let _ = (&mut api_task).await;
-            let _ = (&mut ingress_task).await;
         })
         .await;
 
         if graceful.is_err() {
             warn!("graceful shutdown timed out, aborting remaining tasks");
+            ingress_task.abort();
             ws_task.abort();
             api_task.abort();
-            ingress_task.abort();
         }
+
+        // Abort background dispatch tasks.  Once these stop, the
+        // channels they hold (storage_tx, broadcast subscribers) are
+        // dropped, which cascades cleanup to the storage ingestor.
+        event_dispatch.abort();
+        intruder_event_dispatch.abort();
+        plugin_event_dispatch.abort();
+        app_state_event_dispatch.abort();
+        storage_task.abort();
+
+        // Safety-net: if something still blocks the runtime from
+        // shutting down (e.g. a spawn_blocking thread), force exit
+        // after a short grace period so the user never has to pkill.
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            warn!("forcing process exit after shutdown timeout");
+            std::process::exit(0);
+        });
     }
 
     Ok(())
@@ -525,6 +545,8 @@ async fn run_ingress_with_shutdown(
         "ingress listener started"
     );
 
+    let mut connection_tasks = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -537,7 +559,7 @@ async fn run_ingress_with_shutdown(
                 match accepted {
                     Ok((stream, peer)) => {
                         let targets = targets.clone();
-                        tokio::spawn(async move {
+                        connection_tasks.spawn(async move {
                             if let Err(err) = route_ingress_stream(stream, peer, targets).await {
                                 warn!(%err, %peer, "ingress stream routing failed");
                             }
@@ -549,7 +571,18 @@ async fn run_ingress_with_shutdown(
                     }
                 }
             }
+            // Reap completed connection tasks so the JoinSet doesn't
+            // grow unboundedly during long-running sessions.
+            Some(_) = connection_tasks.join_next(), if !connection_tasks.is_empty() => {}
         }
+    }
+
+    // Abort all still-running connection handlers (keep-alive, CONNECT
+    // tunnels, etc.) so the process can exit cleanly.
+    let active = connection_tasks.len();
+    if active > 0 {
+        info!(active_connections = active, "aborting active connection handlers");
+        connection_tasks.shutdown().await;
     }
 
     Ok(())
