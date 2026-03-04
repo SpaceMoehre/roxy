@@ -375,6 +375,8 @@
               <label><input type="checkbox" id="proxy-history-filter-status-5xx" /> 5xx [server error]</label>
               <label><input type="checkbox" id="proxy-history-filter-status-no-response" /> No response</label>
             </div>
+            <label for="proxy-history-filter-exclude-status">Exclude status codes (comma separated)</label>
+            <input id="proxy-history-filter-exclude-status" placeholder="301,304,404" spellcheck="false" />
           </section>
           <section class="proxy-history-filter-group">
             <h4>Filter by search term</h4>

@@ -69,10 +69,10 @@ function defaultProxyHistoryFilters() {
     showOnlyParameterized: false,
     mime: {
       html: true,
-      script: true,
+      script: false,
       xml: true,
-      css: true,
-      images: true,
+      css: false,
+      images: false,
       flash: true,
       otherText: true,
       otherBinary: true,
@@ -82,12 +82,13 @@ function defaultProxyHistoryFilters() {
       s3xx: true,
       s4xx: true,
       s5xx: true,
-      noResponse: true,
+      noResponse: false,
     },
     searchTerm: '',
     searchRegex: false,
     searchCaseSensitive: false,
     searchNegative: false,
+    excludeStatusCodes: '404',
     showOnlyExtensionsEnabled: false,
     showOnlyExtensions: '',
     hideExtensionsEnabled: false,
@@ -195,6 +196,10 @@ function proxyHistoryReadFiltersFromForm() {
       'proxy-history-filter-search-negative',
       defaults.searchNegative,
     ),
+    excludeStatusCodes: proxyHistoryFilterInputValue(
+      'proxy-history-filter-exclude-status',
+      '',
+    ).trim(),
     showOnlyExtensionsEnabled: proxyHistoryFilterChecked(
       'proxy-history-filter-show-ext-enabled',
       defaults.showOnlyExtensionsEnabled,
@@ -244,6 +249,7 @@ function proxyHistoryWriteFiltersToForm(filters) {
   setCheckbox('proxy-history-filter-search-regex', next.searchRegex);
   setCheckbox('proxy-history-filter-search-case', next.searchCaseSensitive);
   setCheckbox('proxy-history-filter-search-negative', next.searchNegative);
+  setValue('proxy-history-filter-exclude-status', next.excludeStatusCodes);
   setCheckbox('proxy-history-filter-show-ext-enabled', next.showOnlyExtensionsEnabled);
   setValue('proxy-history-filter-show-ext', next.showOnlyExtensions);
   setCheckbox('proxy-history-filter-hide-ext-enabled', next.hideExtensionsEnabled);
@@ -309,6 +315,37 @@ function proxyHistoryParseExtensionSet(rawList) {
     }
   }
   return out;
+}
+
+function parseExcludedStatusCodes(rawList) {
+  const out = new Set();
+  const text = String(rawList || '').trim();
+  if (!text) {
+    return { set: out, error: '' };
+  }
+
+  for (const part of text.split(',')) {
+    const token = part.trim();
+    if (!token) {
+      continue;
+    }
+    if (!/^\d+$/.test(token)) {
+      return {
+        set: new Set(),
+        error: `Invalid status code token '${token}'. Use comma-separated integers.`,
+      };
+    }
+    const code = Number(token);
+    if (!Number.isInteger(code) || code < 100 || code > 599) {
+      return {
+        set: new Set(),
+        error: `Invalid status code '${token}'. Allowed range is 100-599.`,
+      };
+    }
+    out.add(code);
+  }
+
+  return { set: out, error: '' };
 }
 
 function splitHostAndPort(rawValue) {
@@ -614,6 +651,9 @@ function proxyHistoryHasActiveFilters(filters) {
   if (current.searchTerm.trim().length > 0) {
     return true;
   }
+  if (current.excludeStatusCodes.trim().length > 0) {
+    return true;
+  }
   if (current.listenerPort.trim().length > 0) {
     return true;
   }
@@ -655,6 +695,7 @@ function applyProxyHistoryFilters() {
   const searchMatcher = buildProxyHistorySearchMatcher(filters);
   const showOnlyExt = proxyHistoryParseExtensionSet(filters.showOnlyExtensions);
   const hideExt = proxyHistoryParseExtensionSet(filters.hideExtensions);
+  const excludedStatusCodes = parseExcludedStatusCodes(filters.excludeStatusCodes).set;
   const portFilter = Number(filters.listenerPort);
   const hasPortFilter =
     filters.listenerPort.trim().length > 0
@@ -684,6 +725,9 @@ function applyProxyHistoryFilters() {
         return false;
       }
     } else {
+      if (excludedStatusCodes.has(Number(response.status))) {
+        return false;
+      }
       const statusBucket = proxyHistoryStatusBucket(response.status);
       if (statusBucket && !filters.status[statusBucket]) {
         return false;
@@ -753,6 +797,11 @@ function applyProxyHistoryFiltersFromForm(closeAfterApply = false) {
       setProxyHistoryFilterError(`Invalid regex: ${err.message}`);
       return false;
     }
+  }
+  const excludedStatusValidation = parseExcludedStatusCodes(nextFilters.excludeStatusCodes);
+  if (excludedStatusValidation.error) {
+    setProxyHistoryFilterError(excludedStatusValidation.error);
+    return false;
   }
 
   setProxyHistoryFilterError('');
@@ -2649,7 +2698,10 @@ function bindEvents() {
     setProxyHistoryFilterError('');
   });
   qs('proxy-history-filter-revert').addEventListener('click', () => {
-    proxyHistoryWriteFiltersToForm(appState.proxyHistoryFilters);
+    const defaults = defaultProxyHistoryFilters();
+    appState.proxyHistoryFilters = defaults;
+    proxyHistoryWriteFiltersToForm(defaults);
+    applyProxyHistoryFilters();
     setProxyHistoryFilterError('');
   });
   qs('proxy-history-filter-apply').addEventListener('click', () => {
@@ -2661,6 +2713,7 @@ function bindEvents() {
 
   for (const id of [
     'proxy-history-filter-search-term',
+    'proxy-history-filter-exclude-status',
     'proxy-history-filter-show-ext',
     'proxy-history-filter-hide-ext',
     'proxy-history-filter-port',
