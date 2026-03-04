@@ -294,7 +294,7 @@ impl IntruderManager {
         rows
     }
 
-    /// Returns the current snapshot for a single job, or `None` if 
+    /// Returns the current snapshot for a single job, or `None` if
     /// the UUID is unknown.
     pub async fn get_job(&self, id: Uuid) -> Option<IntruderJobSnapshot> {
         let state = self.jobs.get(&id)?;
