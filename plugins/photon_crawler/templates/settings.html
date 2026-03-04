@@ -1,0 +1,34 @@
+<div class="stack" style="gap:.75rem;">
+  <label style="display:flex;flex-direction:column;gap:.2rem;">
+    Default crawl depth
+    <input id="setting-photon-level" type="number" value="2" min="1" max="10" />
+  </label>
+  <label style="display:flex;flex-direction:column;gap:.2rem;">
+    Default thread count
+    <input id="setting-photon-threads" type="number" value="2" min="1" max="50" />
+  </label>
+  <label style="display:flex;flex-direction:column;gap:.2rem;">
+    Default timeout (seconds)
+    <input id="setting-photon-timeout" type="number" value="6" min="1" max="60" />
+  </label>
+  <label style="display:flex;flex-direction:column;gap:.2rem;">
+    Max crawl timeout (seconds)
+    <input id="setting-photon-max-timeout" type="number" value="600" min="60" max="3600" />
+  </label>
+  <label style="display:flex;align-items:center;gap:.4rem;">
+    <input id="setting-photon-keys" type="checkbox" />
+    Always extract secret keys
+  </label>
+  <label style="display:flex;align-items:center;gap:.4rem;">
+    <input id="setting-photon-wayback" type="checkbox" />
+    Always use Wayback Machine seeds
+  </label>
+  <label style="display:flex;align-items:center;gap:.4rem;">
+    <input id="setting-photon-dns" type="checkbox" />
+    Always enumerate DNS / subdomains
+  </label>
+  <label style="display:flex;flex-direction:column;gap:.2rem;">
+    Last crawl results
+    <input id="setting-photon-last-count" type="text" readonly value="–" />
+  </label>
+</div>

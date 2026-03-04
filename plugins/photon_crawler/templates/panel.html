@@ -1,0 +1,148 @@
+<section class="card compact" id="plugins-photon-crawl">
+  <div class="panel-head">
+    <h4>Photon OSINT Crawler</h4>
+    <span class="photon-installed-badge badge" style="margin-left:auto;font-size:.75rem;"></span>
+  </div>
+  <p class="hint">
+    Fast recursive web crawler for OSINT. Extracts URLs, parameters, emails,
+    API keys, JS endpoints, files, and more.
+    <a href="https://github.com/s0md3v/Photon" target="_blank" rel="noopener" style="font-size:.8rem;">GitHub</a>
+  </p>
+
+  <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem;">
+    <input
+      type="text"
+      class="photon-url"
+      placeholder="https://example.com"
+      style="flex:1;"
+    />
+    <button class="photon-crawl-btn" type="button">Crawl</button>
+  </div>
+
+  <div class="photon-status hint" style="margin-bottom:.5rem;"></div>
+
+  <details class="photon-output-details" style="margin-top:.5rem;">
+    <summary style="cursor:pointer;font-size:.85rem;font-weight:600;user-select:none;">
+      Live Output
+    </summary>
+    <div class="photon-live-output scroll-list"
+         style="max-height:260px;overflow-y:auto;font-family:var(--font-mono,monospace);
+                font-size:.8rem;padding:.35rem .5rem;background:var(--color-surface-alt,#1a1a2e);
+                border-radius:4px;margin-top:.35rem;white-space:pre-wrap;">
+    </div>
+  </details>
+</section>
+
+<!-- Options panel (collapsible) -->
+<section class="card compact" id="plugins-photon-options">
+  <details>
+    <summary style="cursor:pointer;font-weight:600;user-select:none;">
+      Crawl Options
+    </summary>
+    <div class="stack" style="gap:.5rem;margin-top:.5rem;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;">
+        <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+          Depth (levels)
+          <input type="number" class="photon-opt-level" value="2" min="1" max="10" style="width:100%;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+          Threads
+          <input type="number" class="photon-opt-threads" value="2" min="1" max="50" style="width:100%;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+          Delay (seconds)
+          <input type="number" class="photon-opt-delay" value="0" min="0" step="0.5" style="width:100%;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+          Timeout (seconds)
+          <input type="number" class="photon-opt-timeout" value="6" min="1" max="60" style="width:100%;" />
+        </label>
+      </div>
+
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+        Cookie header
+        <input type="text" class="photon-opt-cookie" placeholder="PHPSESSID=abc123" style="width:100%;" />
+      </label>
+
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+        Seed URLs (comma-separated)
+        <input type="text" class="photon-opt-seeds" placeholder="https://example.com/blog,https://example.com/faq" style="width:100%;" />
+      </label>
+
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+        Exclude regex
+        <input type="text" class="photon-opt-exclude" placeholder="/blog/2017|/logout" style="width:100%;" />
+      </label>
+
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+        Custom regex
+        <input type="text" class="photon-opt-regex" placeholder="\d{10}" style="width:100%;" />
+      </label>
+
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+        User-Agent(s) (comma-separated)
+        <input type="text" class="photon-opt-useragent" placeholder="Mozilla/5.0 ..." style="width:100%;" />
+      </label>
+
+      <div style="display:flex;flex-wrap:wrap;gap:.75rem;margin-top:.25rem;">
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+          <input type="checkbox" class="photon-opt-keys" />
+          Extract secret keys
+        </label>
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+          <input type="checkbox" class="photon-opt-wayback" />
+          Wayback seeds
+        </label>
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+          <input type="checkbox" class="photon-opt-dns" />
+          DNS enumeration
+        </label>
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+          <input type="checkbox" class="photon-opt-ninja" />
+          Ninja mode
+        </label>
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+          <input type="checkbox" class="photon-opt-onlyurls" />
+          Only URLs
+        </label>
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- Results panel -->
+<section class="card compact" id="plugins-photon-results" style="display:none;">
+  <div class="panel-head">
+    <h4>Crawl Results</h4>
+    <span class="photon-total-count badge" style="margin-left:auto;"></span>
+  </div>
+
+  <div class="photon-summary" style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.75rem;"></div>
+
+  <div class="photon-scope-actions" style="display:flex;gap:.5rem;margin-bottom:.75rem;flex-wrap:wrap;">
+    <button class="photon-add-internal" type="button" title="Add discovered internal URLs to proxy scope">Add Internal to Scope</button>
+    <button class="photon-add-fuzzable" type="button" title="Add fuzzable (parameterized) URLs to proxy scope">Add Fuzzable to Scope</button>
+  </div>
+
+  <!-- Tabs for each result category -->
+  <div class="photon-tabs" style="display:flex;flex-wrap:wrap;gap:.25rem;margin-bottom:.5rem;">
+    <button class="photon-tab active" data-cat="internal">Internal</button>
+    <button class="photon-tab" data-cat="external">External</button>
+    <button class="photon-tab" data-cat="fuzzable">Fuzzable</button>
+    <button class="photon-tab" data-cat="endpoints">Endpoints</button>
+    <button class="photon-tab" data-cat="intel">Intel</button>
+    <button class="photon-tab" data-cat="files">Files</button>
+    <button class="photon-tab" data-cat="scripts">Scripts</button>
+    <button class="photon-tab" data-cat="keys">Keys</button>
+    <button class="photon-tab" data-cat="robots">Robots</button>
+    <button class="photon-tab" data-cat="custom">Custom</button>
+    <button class="photon-tab" data-cat="subdomains">Subdomains</button>
+  </div>
+
+  <div class="photon-results-list scroll-list"
+       style="max-height:420px;overflow-y:auto;font-family:var(--font-mono,monospace);
+              font-size:.8rem;padding:.35rem .5rem;">
+  </div>
+
+  <div class="photon-elapsed hint" style="margin-top:.5rem;font-size:.8rem;"></div>
+</section>
