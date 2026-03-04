@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import URLError
-from urllib.request import Request, urlopen, build_opener, ProxyHandler
+from urllib.request import Request, urlopen, build_opener, ProxyHandler, HTTPSHandler
 import sys
 
 
@@ -142,10 +142,16 @@ def _set_proxy(proxy_url: str | None) -> None:
 
 
 def _build_opener_with_proxy():
-    """Build a urllib opener that routes through the configured proxy."""
+    """Build a urllib opener that routes through the configured proxy.
+
+    When a proxy is configured, we attach an HTTPSHandler with certificate
+    verification disabled so that the MITM certificate presented by Roxy
+    is accepted.
+    """
     if _PROXY_URL:
         return build_opener(
-            ProxyHandler({"http": _PROXY_URL, "https": _PROXY_URL})
+            ProxyHandler({"http": _PROXY_URL, "https": _PROXY_URL}),
+            HTTPSHandler(context=_get_ssl_ctx()),
         )
     return None
 
