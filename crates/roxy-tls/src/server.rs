@@ -1,3 +1,9 @@
+//! Downstream MITM TLS acceptor.
+//!
+//! Builds a [`SslAcceptor`] from a DER-encoded leaf certificate and
+//! private key so the proxy can terminate TLS on behalf of the
+//! intercepted domain.
+
 use anyhow::{Context, Result};
 use boring::{
     pkey::PKey,
@@ -5,6 +11,15 @@ use boring::{
     x509::X509,
 };
 
+/// Creates a BoringSSL TLS acceptor configured for MITM interception.
+///
+/// The acceptor uses Mozilla’s intermediate v5 configuration, TLS
+/// 1.2–1.3, and advertises `http/1.1` via ALPN.
+///
+/// # Errors
+///
+/// Returns an error if the DER cannot be parsed or the
+/// certificate/key pair is invalid.
 pub fn build_downstream_mitm_acceptor(cert_der: &[u8], key_der: &[u8]) -> Result<SslAcceptor> {
     let cert =
         X509::from_der(cert_der).context("failed parsing generated leaf certificate for TLS")?;

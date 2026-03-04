@@ -1,6 +1,27 @@
-//! roxy_core `proxy` module.
+//! Core HTTP/HTTPS proxy engine.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! [`ProxyEngine`] is the heart of roxy. It binds a TCP listener and
+//! handles both plain HTTP requests and `CONNECT` tunnels. When MITM
+//! is enabled it terminates TLS on the downstream side using
+//! per-domain leaf certificates, forwards the decrypted request
+//! upstream (optionally through a chain of HTTP / SOCKS4 / SOCKS5
+//! proxies), and records every exchange as a
+//! [`CapturedExchange`].
+//!
+//! ## Request lifecycle
+//!
+//! 1. **Capture** — the raw bytes are parsed and wrapped in a
+//!    [`CapturedRequest`].
+//! 2. **Middleware** — [`ProxyMiddleware::on_request_pre_capture`]
+//!    may mutate the request.
+//! 3. **Interception** — if the global intercept toggle is on the
+//!    request is held until the UI forwards / drops / mutates it.
+//! 4. **Upstream** — the request is sent to the origin (or through the
+//!    configured upstream proxy chain) with optional TLS + ECH.
+//! 5. **Response interception** — same hold-for-UI cycle, this time
+//!    for the response.
+//! 6. **Event emission** — the completed exchange is pushed to the
+//!    storage/event pipeline.
 
 use std::{
     convert::Infallible,
@@ -53,15 +74,23 @@ use crate::{
     },
 };
 
-#[derive(Clone)]
-/// Represents `ProxyEngine`.
+/// The main proxy engine.
 ///
-/// See also: [`ProxyEngine`].
+/// Cheaply cloneable (all inner state is behind [`Arc`]). Construct
+/// one with [`ProxyEngine::new`], optionally attach middleware with
+/// [`with_middleware`](Self::with_middleware), then call one of the
+/// `run*` family of methods to start accepting connections.
+#[derive(Clone)]
 pub struct ProxyEngine {
+    /// Static proxy configuration (bind address, timeouts, MITM flag).
     config: ProxyConfig,
+    /// Shared mutable application state (intercept toggles, scope, etc.).
     state: Arc<AppState>,
+    /// Dynamic TLS certificate manager.
     cert_manager: Arc<CertManager>,
+    /// Channel for emitting captured exchanges to storage/plugins.
     event_tx: mpsc::Sender<EventEnvelope>,
+    /// Optional request/response middleware.
     middleware: Option<Arc<dyn ProxyMiddleware>>,
 }
 
@@ -75,13 +104,11 @@ struct AuthorityResolveCacheEntry {
 }
 
 impl ProxyEngine {
-    /// Constructs a new instance.
+    /// Creates a new engine.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// The engine starts without middleware. Call
+    /// [`with_middleware`](Self::with_middleware) to attach one before
+    /// starting the listener.
     pub fn new(
         config: ProxyConfig,
         state: Arc<AppState>,
@@ -97,57 +124,48 @@ impl ProxyEngine {
         }
     }
 
-    /// Executes `with middleware`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Attaches a [`ProxyMiddleware`]
+    /// implementation that will be called for every proxied request and
+    /// response.
     pub fn with_middleware(mut self, middleware: Arc<dyn ProxyMiddleware>) -> Self {
         self.middleware = Some(middleware);
         self
     }
 
-    /// Executes `run`.
+    /// Starts the proxy listener and blocks until the process is
+    /// terminated.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// This is a convenience wrapper around [`run_with_shutdown`](Self::run_with_shutdown)
+    /// with a no-op shutdown channel.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the TCP listener cannot be bound.
     pub async fn run(self) -> Result<()> {
         let (_tx, rx) = watch::channel(false);
         self.run_with_shutdown(rx).await
     }
 
-    /// Runs `with shutdown`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Starts the proxy listener and blocks until the `shutdown`
+    /// channel signals `true` or is dropped.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the TCP listener cannot be bound.
     pub async fn run_with_shutdown(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         self.run_with_shutdown_and_ready(&mut shutdown, None).await
     }
 
-    /// Runs `with shutdown and ready`.
+    /// Starts the listener with both a shutdown channel and an
+    /// optional `ready` oneshot that receives the actual bound
+    /// [`SocketAddr`] once the listener is up.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// If the requested port is busy the engine will try incrementing
+    /// ports until a free one is found.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if no available port can be bound.
     pub async fn run_with_shutdown_and_ready(
         self,
         shutdown: &mut watch::Receiver<bool>,
@@ -193,16 +211,12 @@ impl ProxyEngine {
         Ok(())
     }
 
-    /// Executes `serve stream`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Serves a single accepted TCP stream through the HTTP/1.1
+    /// pipeline (plain or `CONNECT`‑upgraded HTTPS).
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the hyper HTTP service loop fails.
     pub async fn serve_stream(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<()> {
         let io = TokioIo::new(stream);
         let svc_engine = self.clone();

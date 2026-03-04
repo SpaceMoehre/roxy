@@ -1,6 +1,16 @@
-//! roxy_core `model` module.
+//! Core domain types shared across the roxy workspace.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! Every HTTP exchange captured by the proxy is represented as a
+//! [`CapturedRequest`] / [`CapturedResponse`] pair bundled into a
+//! [`CapturedExchange`].  These types are serialisable with `serde` so they
+//! can be persisted to `roxy_storage` and pushed over
+//! WebSocket via [`EventEnvelope`].
+//!
+//! Mutation types ([`RequestMutation`], [`ResponseMutation`]) describe
+//! targeted edits that the intercept UI applies to in-flight exchanges.
+//!
+//! Utility functions [`headers_to_pairs`], [`now_unix_ms`], [`apply_mutation`],
+//! and [`apply_response_mutation`] are re-exported at the crate root.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,90 +19,134 @@ use http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Aliases a type as `RequestId`.
+/// Strongly-typed alias for the UUID that identifies a single captured request.
 pub type RequestId = Uuid;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-/// Represents `HeaderValuePair`.
+/// A single HTTP header represented as owned name/value strings.
 ///
-/// See also: [`HeaderValuePair`].
+/// The proxy stores headers in this form rather than [`http::HeaderMap`] so
+/// the values can be round-tripped through JSON without loss.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HeaderValuePair {
+    /// Header name, e.g. `"content-type"`.
     pub name: String,
+    /// Header value, e.g. `"application/json"`.
     pub value: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `CapturedRequest`.
+/// A complete HTTP request as captured by the proxy engine.
 ///
-/// See also: [`CapturedRequest`].
+/// The `raw` field always contains the full wire-format bytes (request-line +
+/// headers + body) exactly as they will be forwarded upstream.  The structured
+/// fields (`method`, `uri`, …) are derived from the raw blob and updated
+/// whenever the blob is re-parsed after a mutation or middleware transform.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CapturedRequest {
+    /// Unique identifier assigned when the request enters the proxy.
     pub id: RequestId,
+    /// Wall-clock timestamp (milliseconds since Unix epoch) when the request
+    /// was first seen.
     pub created_at_unix_ms: u128,
+    /// HTTP method, e.g. `"GET"`, `"POST"`.
     pub method: String,
+    /// Fully-qualified request URI including scheme and authority.
     pub uri: String,
+    /// Target hostname extracted from the URI or the `Host` header.
     pub host: String,
+    /// Request headers in stable insertion order.
     pub headers: Vec<HeaderValuePair>,
+    /// Decoded request body bytes (may be empty for bodyless methods).
     pub body: Bytes,
+    /// Complete raw request blob (request-line + headers + body) in wire
+    /// format.
     #[serde(default)]
     pub raw: Bytes,
 }
 
+/// A complete HTTP response paired with the request that triggered it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `CapturedResponse`.
-///
-/// See also: [`CapturedResponse`].
 pub struct CapturedResponse {
+    /// The [`RequestId`] of the originating request.
     pub request_id: RequestId,
+    /// Wall-clock timestamp (milliseconds since Unix epoch) when the response
+    /// was received.
     pub created_at_unix_ms: u128,
+    /// Numeric HTTP status code, e.g. `200`, `404`.
     pub status: u16,
+    /// Response headers in order.
     pub headers: Vec<HeaderValuePair>,
+    /// Decoded response body bytes (content-encoding already unwrapped by the
+    /// proxy engine).
     pub body: Bytes,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `CapturedExchange`.
+/// A request/response pair with timing and optional error context.
 ///
-/// See also: [`CapturedExchange`].
+/// This is the primary unit that flows through the event pipeline, is
+/// persisted to storage, and is broadcast over WebSocket to the dashboard.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CapturedExchange {
+    /// The captured request.
     pub request: CapturedRequest,
+    /// The captured response, or `None` if the exchange was dropped or errored
+    /// before a response could be obtained.
     pub response: Option<CapturedResponse>,
+    /// Total wall-clock duration of the round-trip, in milliseconds.
     pub duration_ms: u128,
+    /// Human-readable error message when the exchange did not complete
+    /// normally (e.g. "response dropped by interceptor").
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `RequestMutation`.
+/// Describes a targeted edit to an in-flight request.
 ///
-/// See also: [`RequestMutation`].
+/// Currently the only supported mutation is replacing the entire raw blob;
+/// the proxy re-parses the blob after applying the mutation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestMutation {
+    /// Replacement raw request blob.  When `Some`, the proxy replaces the
+    /// entire wire-format blob and re-parses method/uri/host/headers/body
+    /// from the new value.
     pub raw: Option<Bytes>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `ResponseMutation`.
+/// Describes a targeted edit to an in-flight response.
 ///
-/// See also: [`ResponseMutation`].
+/// Each field is optional; only fields set to `Some` are overwritten.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResponseMutation {
+    /// Override the HTTP status code.
     pub status: Option<u16>,
+    /// Replace the entire header list.
     pub headers: Option<Vec<HeaderValuePair>>,
+    /// Replace the response body bytes.
     pub body: Option<Bytes>,
 }
 
+/// Envelope pushed through the event pipeline and broadcast over WebSocket.
+///
+/// Tagged with `#[serde(tag = "event", content = "payload")]` so each variant
+/// serialises as `{"event": "<tag>", "payload": {…}}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
-/// Enumerates `EventEnvelope` variants.
-///
-/// See also: [`EventEnvelope`].
 pub enum EventEnvelope {
+    /// A completed (or failed) HTTP exchange.
     Exchange(CapturedExchange),
 }
 
-/// Executes `headers to pairs`.
+/// Converts an [`http::HeaderMap`] into a `Vec<HeaderValuePair>`, discarding
+/// any header values that are not valid UTF-8.
 ///
 /// # Examples
+///
 /// ```
-/// use roxy_core as _;
-/// assert!(true);
+/// use roxy_core::model::{headers_to_pairs, HeaderValuePair};
+///
+/// let mut map = http::HeaderMap::new();
+/// map.insert("content-type", "text/plain".parse().unwrap());
+/// let pairs = headers_to_pairs(&map);
+/// assert_eq!(pairs.len(), 1);
+/// assert_eq!(pairs[0].name, "content-type");
 /// ```
 pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<HeaderValuePair> {
     headers
@@ -106,12 +160,16 @@ pub fn headers_to_pairs(headers: &HeaderMap) -> Vec<HeaderValuePair> {
         .collect()
 }
 
-/// Executes `now unix ms`.
+/// Returns the current wall-clock time as milliseconds since the Unix epoch.
+///
+/// Falls back to `0` if the system clock is before the epoch (should never
+/// happen in practice).
 ///
 /// # Examples
+///
 /// ```
-/// use roxy_core as _;
-/// assert!(true);
+/// let ts = roxy_core::model::now_unix_ms();
+/// assert!(ts > 1_700_000_000_000); // well past 2023
 /// ```
 pub fn now_unix_ms() -> u128 {
     SystemTime::now()
@@ -120,13 +178,12 @@ pub fn now_unix_ms() -> u128 {
         .as_millis()
 }
 
-/// Applies `mutation`.
+/// Applies a [`RequestMutation`] to a [`CapturedRequest`], returning the
+/// (possibly modified) request.
 ///
-/// # Examples
-/// ```
-/// use roxy_core as _;
-/// assert!(true);
-/// ```
+/// Currently only the `raw` field is supported — when set, the entire raw
+/// blob is replaced. The caller is responsible for re-parsing structured
+/// fields from the new blob afterwards.
 pub fn apply_mutation(mut request: CapturedRequest, mutation: RequestMutation) -> CapturedRequest {
     if let Some(raw) = mutation.raw {
         request.raw = raw;
@@ -134,13 +191,11 @@ pub fn apply_mutation(mut request: CapturedRequest, mutation: RequestMutation) -
     request
 }
 
-/// Applies `response mutation`.
+/// Applies a [`ResponseMutation`] to a [`CapturedResponse`], returning the
+/// (possibly modified) response.
 ///
-/// # Examples
-/// ```
-/// use roxy_core as _;
-/// assert!(true);
-/// ```
+/// Only fields set to `Some` in the mutation are overwritten; `None` fields
+/// leave the original value intact.
 pub fn apply_response_mutation(
     mut response: CapturedResponse,
     mutation: ResponseMutation,

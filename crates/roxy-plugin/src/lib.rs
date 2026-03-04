@@ -1,6 +1,32 @@
-//! roxy_plugin `crate root` module.
+//! Python plugin lifecycle manager.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! Plugins are standalone Python scripts that communicate over a JSON
+//! stdin/stdout protocol. Each plugin declares the **hooks** it
+//! supports (e.g. `on_request_pre_capture`, `on_response_pre_capture`)
+//! and the [`PluginManager`] dispatches [`PluginInvocation`]s to the
+//! appropriate script.
+//!
+//! ## Protocol
+//!
+//! 1. The manager serialises a [`PluginInvocation`] as JSON and writes
+//!    it to the child process’s **stdin**, then closes the pipe.
+//! 2. The script reads stdin, executes its logic, and writes a single
+//!    JSON object to **stdout**.
+//! 3. Non-zero exit codes or unparseable output are treated as errors.
+//!
+//! ## Settings
+//!
+//! Per-plugin settings are stored as a `serde_json::Value` map and
+//! injected into every invocation payload under the
+//! `"plugin_settings"` key so the script can read them without
+//! additional I/O.
+//!
+//! ## Events
+//!
+//! All lifecycle changes (`register`, `unregister`, `settings_updated`,
+//! `alteration_recorded`) are broadcast via a
+//! [`broadcast`] channel as
+//! [`PluginManagerEvent`]s.
 
 use std::{
     collections::HashMap,
@@ -18,77 +44,100 @@ use tokio::{
     time::{Duration, timeout},
 };
 
+/// Metadata captured when a plugin is registered with the manager.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PluginRegistration`.
-///
-/// See also: [`PluginRegistration`].
 pub struct PluginRegistration {
+    /// Unique, human-readable plugin name (e.g. `"string-substitute"`).
     pub name: String,
+    /// Absolute path to the Python entry-point script.
     pub script_path: PathBuf,
+    /// Hook names the plugin declares support for.
     pub hooks: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PluginInvocation`.
+/// A single call dispatched to a plugin.
 ///
-/// See also: [`PluginInvocation`].
+/// Serialised to JSON and written to the child process’s stdin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginInvocation {
+    /// Hook being invoked (e.g. `"on_request_pre_capture"`).
     pub hook: String,
+    /// Arbitrary JSON payload for the hook.
     pub payload: Value,
 }
 
+/// The result returned by a plugin invocation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PluginResponse`.
-///
-/// See also: [`PluginResponse`].
 pub struct PluginResponse {
+    /// Name of the plugin that produced this response.
     pub plugin: String,
+    /// Hook that was invoked.
     pub hook: String,
+    /// Parsed JSON from the script’s stdout.
     pub output: Value,
 }
 
+/// Record of a mutation performed by a plugin on a proxied request or
+/// response, stored for audit purposes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PluginAlteration`.
-///
-/// See also: [`PluginAlteration`].
 pub struct PluginAlteration {
+    /// Plugin that performed the alteration.
     pub plugin: String,
+    /// Hook that triggered it.
     pub hook: String,
+    /// UUID of the affected request, if applicable.
     pub request_id: Option<String>,
+    /// When the alteration occurred (Unix epoch, ms).
     pub unix_ms: u128,
+    /// Human-readable description of what changed.
     pub summary: String,
 }
 
+/// Lightweight view of a plugin used in broadcast events.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PluginEventRegistration`.
-///
-/// See also: [`PluginEventRegistration`].
 pub struct PluginEventRegistration {
+    /// Plugin name.
     pub name: String,
+    /// Hooks the plugin supports.
     pub hooks: Vec<String>,
 }
 
+/// Real-time lifecycle event broadcast by the plugin subsystem.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
-/// Enumerates `PluginManagerEvent` variants.
-///
-/// See also: [`PluginManagerEvent`].
 pub enum PluginManagerEvent {
+    /// A new plugin was registered.
     PluginRegistered(PluginEventRegistration),
-    PluginUnregistered { name: String },
-    PluginSettingsUpdated { name: String },
+    /// A plugin was removed.
+    PluginUnregistered {
+        /// Name of the removed plugin.
+        name: String,
+    },
+    /// A plugin’s settings map was replaced.
+    PluginSettingsUpdated {
+        /// Name of the affected plugin.
+        name: String,
+    },
+    /// A plugin reported a mutation on a proxied exchange.
     PluginAlterationRecorded(PluginAlteration),
 }
 
-#[derive(Clone)]
-/// Represents `PluginManager`.
+/// Central plugin registry and executor.
 ///
-/// See also: [`PluginManager`].
+/// Cheaply cloneable — all inner state is behind [`Arc`] + [`RwLock`].
+/// Create one via [`Default::default()`] then [`register`](Self::register)
+/// plugins as they are discovered.
+#[derive(Clone)]
 pub struct PluginManager {
+    /// Plugin name → registration metadata.
     registry: Arc<RwLock<HashMap<String, PluginRegistration>>>,
+    /// Plugin name → settings JSON map.
     settings: Arc<RwLock<HashMap<String, Value>>>,
+    /// Plugin name → alteration audit log (capped at 1 000 per plugin).
     alterations: Arc<RwLock<HashMap<String, Vec<PluginAlteration>>>>,
+    /// Fan-out channel for [`PluginManagerEvent`]s.
     events_tx: Arc<broadcast::Sender<PluginManagerEvent>>,
+    /// Path to the Python interpreter binary.
     python_path: Arc<RwLock<PathBuf>>,
 }
 
@@ -106,13 +155,7 @@ impl Default for PluginManager {
 }
 
 impl PluginManager {
-    /// Subscribes to `events`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a new receiver for plugin lifecycle events.
     pub fn subscribe_events(&self) -> broadcast::Receiver<PluginManagerEvent> {
         self.events_tx.subscribe()
     }
@@ -131,16 +174,14 @@ impl PluginManager {
         let _ = self.events_tx.send(event);
     }
 
-    /// Executes `register`.
+    /// Adds a plugin to the registry.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// An empty settings map is initialised for the plugin and a
+    /// [`PluginManagerEvent::PluginRegistered`] event is broadcast.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin’s `script_path` does not exist.
     pub async fn register(&self, registration: PluginRegistration) -> Result<()> {
         if !registration.script_path.exists() {
             return Err(anyhow!(
@@ -172,13 +213,11 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Executes `unregister`.
+    /// Removes a plugin from the registry.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `true` if the plugin existed. A
+    /// [`PluginManagerEvent::PluginUnregistered`] event is broadcast
+    /// on successful removal.
     pub async fn unregister(&self, name: &str) -> bool {
         let removed = self.registry.write().await.remove(name).is_some();
         if removed {
@@ -191,13 +230,7 @@ impl PluginManager {
         removed
     }
 
-    /// Executes `list`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Returns all registered plugins sorted alphabetically by name.
     pub async fn list(&self) -> Vec<PluginRegistration> {
         let mut rows: Vec<PluginRegistration> =
             self.registry.read().await.values().cloned().collect();
@@ -210,16 +243,15 @@ impl PluginManager {
         self.registry.read().await.get(name).cloned()
     }
 
-    /// Executes `invoke`.
+    /// Invokes a specific hook on a single named plugin.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// The invocation payload is enriched with the plugin’s current
+    /// settings before being sent.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin is unknown, does not expose the
+    /// requested hook, or the subprocess fails.
     pub async fn invoke(
         &self,
         plugin_name: &str,
@@ -290,16 +322,12 @@ impl PluginManager {
         Ok((line_rx, result_rx))
     }
 
-    /// Executes `invoke all`.
+    /// Invokes a hook on **every** plugin that declares it, with a
+    /// per-plugin timeout.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
-    ///
-    /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    /// Returns one `Result<PluginResponse>` per invoked plugin.
+    /// Plugins whose settings indicate they should be skipped (e.g.
+    /// `string-substitute` with no rules) are omitted silently.
     pub async fn invoke_all(
         &self,
         hook: &str,
@@ -347,16 +375,14 @@ impl PluginManager {
         out
     }
 
-    /// Sets `settings`.
+    /// Replaces the settings map for a plugin.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Non-object values are wrapped in `{"value": …}`. A
+    /// [`PluginManagerEvent::PluginSettingsUpdated`] event is broadcast.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin is unknown.
     pub async fn set_settings(&self, plugin_name: &str, settings: Value) -> Result<()> {
         if !self.registry.read().await.contains_key(plugin_name) {
             return Err(anyhow!("unknown plugin: {plugin_name}"));
@@ -371,16 +397,11 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Gets `settings`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the current settings JSON map for a plugin.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin is unknown.
     pub async fn get_settings(&self, plugin_name: &str) -> Result<Value> {
         if !self.registry.read().await.contains_key(plugin_name) {
             return Err(anyhow!("unknown plugin: {plugin_name}"));
@@ -394,16 +415,13 @@ impl PluginManager {
             .unwrap_or_else(|| Value::Object(Map::new())))
     }
 
-    /// Executes `record alteration`.
+    /// Appends an alteration record for a plugin.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// Only the most recent 1 000 entries per plugin are retained.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin is unknown.
     pub async fn record_alteration(&self, alteration: PluginAlteration) -> Result<()> {
         if !self.registry.read().await.contains_key(&alteration.plugin) {
             return Err(anyhow!("unknown plugin: {}", alteration.plugin));
@@ -423,16 +441,13 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Lists `alterations`.
+    /// Returns the most recent alterations for a plugin, newest first.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_plugin as _;
-    /// assert!(true);
-    /// ```
+    /// `limit` is clamped to `1..=1_000`.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the plugin is unknown.
     pub async fn list_alterations(
         &self,
         plugin_name: &str,

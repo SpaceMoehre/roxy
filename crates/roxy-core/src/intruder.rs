@@ -1,6 +1,24 @@
-//! roxy_core `intruder` module.
+//! Automated HTTP fuzzer with configurable attack strategies.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! This module implements a Burp Suite–style "Intruder" that sends
+//! parameterised HTTP requests in bulk. Users define a **request blob
+//! template** containing `{{key}}` placeholders and optional `§…§`
+//! section markers, attach one or more [`IntruderPayloadSet`]s, and
+//! choose a [`IntruderStrategy`].
+//!
+//! ## Attack strategies
+//!
+//! | Strategy | Behaviour |
+//! |---|---|
+//! | [`IntruderStrategy::ClusterBomb`] | Cartesian product of all payload sets |
+//! | [`IntruderStrategy::Sniper`] | Cycles one position at a time, baseline for the rest |
+//!
+//! ## Concurrency
+//!
+//! Jobs are executed on a Tokio [`JoinSet`] with
+//! a configurable concurrency cap (default 16, max 256). Results stream
+//! through a [`broadcast`] channel as
+//! [`IntruderEvent`]s so the UI can update in real time.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -23,22 +41,30 @@ use crate::{
     raw_http::{ParsedRequestBlob, parse_request_blob},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `IntruderPayloadSet`.
+/// A named list of values to substitute into a request template.
 ///
-/// See also: [`IntruderPayloadSet`].
+/// Each set is identified by a unique `key` that corresponds to a
+/// `{{key}}` placeholder in the request blob template.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntruderPayloadSet {
+    /// Placeholder name — must be unique within a single job spec.
     pub key: String,
+    /// The values to iterate over for this placeholder.
     pub values: Vec<String>,
 }
 
+/// Determines how payload sets are combined into concrete request vectors.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Enumerates `IntruderStrategy` variants.
-///
-/// See also: [`IntruderStrategy`].
 pub enum IntruderStrategy {
+    /// Cartesian product — every combination of every payload set value.
+    ///
+    /// With two sets of sizes *m* and *n* this produces *m × n* requests.
     ClusterBomb,
+    /// One position at a time — each set is iterated while the others
+    /// stay at their first (baseline) value.
+    ///
+    /// With two sets of sizes *m* and *n* this produces *m + n* requests.
     Sniper,
 }
 
@@ -48,85 +74,119 @@ impl Default for IntruderStrategy {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `IntruderJobSpec`.
+/// Full specification for an intruder job submitted by the user.
 ///
-/// See also: [`IntruderJobSpec`].
+/// The `request_blob_template` may contain `{{key}}` placeholders that
+/// map to [`IntruderPayloadSet`] keys, and `§…§` section markers for
+/// inline value replacement.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntruderJobSpec {
+    /// Human-readable label shown in the jobs list.
     pub name: String,
+    /// Raw HTTP request with placeholder / marker syntax.
     pub request_blob_template: String,
+    /// Fallback scheme if one cannot be inferred from the template
+    /// (defaults to `"http"`).
     #[serde(default)]
     pub default_scheme: Option<String>,
+    /// Payload sets whose values are substituted into the template.
     #[serde(default)]
     pub payload_sets: Vec<IntruderPayloadSet>,
+    /// Combination strategy (defaults to [`IntruderStrategy::ClusterBomb`]).
     #[serde(default)]
     pub strategy: IntruderStrategy,
+    /// Maximum number of in-flight requests (default 16, clamped to 1–256).
     pub concurrency: Option<usize>,
+    /// Per-request timeout in milliseconds (default 15 000).
     pub timeout_ms: Option<u64>,
 }
 
+/// Lifecycle state of an intruder job.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Enumerates `IntruderJobStatus` variants.
-///
-/// See also: [`IntruderJobStatus`].
 pub enum IntruderJobStatus {
+    /// Job has been queued but execution has not started.
     Pending,
+    /// Requests are actively being sent.
     Running,
+    /// All requests finished without a fatal error.
     Completed,
+    /// The job was aborted due to an unrecoverable error.
     Failed,
 }
 
+/// Outcome of a single intruder request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `IntruderResult`.
-///
-/// See also: [`IntruderResult`].
 pub struct IntruderResult {
+    /// Zero-based ordinal within the job.
     pub sequence: usize,
+    /// The concrete payload key → value map used for this request.
     pub payloads: BTreeMap<String, String>,
+    /// HTTP status code, absent when the request itself failed.
     pub status: Option<u16>,
+    /// Round-trip time in milliseconds.
     pub duration_ms: u128,
+    /// Response body size in bytes.
     pub response_size: usize,
+    /// The fully-rendered raw request that was sent.
     pub request_blob: String,
+    /// The raw response (status-line + headers + body), if received.
     pub response_blob: Option<String>,
+    /// Error message when the request could not be completed.
     pub error: Option<String>,
 }
 
+/// Point-in-time view of a job's progress, safe to serialise and send
+/// to the UI.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `IntruderJobSnapshot`.
-///
-/// See also: [`IntruderJobSnapshot`].
 pub struct IntruderJobSnapshot {
+    /// Unique job identifier.
     pub id: Uuid,
+    /// Human-readable label.
     pub name: String,
+    /// Unix epoch timestamp (ms) when the job was created.
     pub created_at_unix_ms: u128,
+    /// When execution actually began (first request sent).
     pub started_at_unix_ms: Option<u128>,
+    /// When the last result was collected.
     pub ended_at_unix_ms: Option<u128>,
+    /// Current lifecycle state.
     pub status: IntruderJobStatus,
+    /// Number of requests that have finished so far.
     pub completed: usize,
+    /// Total number of requests that will be sent.
     pub total: usize,
+    /// Fatal error message, present only when `status == Failed`.
     pub error: Option<String>,
 }
 
+/// Real-time event broadcast by the intruder subsystem.
+///
+/// Sent over a [`broadcast`] channel and
+/// forwarded to WebSocket clients.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
-/// Enumerates `IntruderEvent` variants.
-///
-/// See also: [`IntruderEvent`].
 pub enum IntruderEvent {
+    /// The job snapshot changed (status transition or progress tick).
     JobUpdated(IntruderJobSnapshot),
+    /// A single request completed (success or per-request error).
     JobResult {
+        /// Which job produced this result.
         job_id: Uuid,
+        /// The individual request outcome.
         result: IntruderResult,
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `IntruderJobDetails`.
+/// Full details of a job including its first *N* results.
 ///
-/// See also: [`IntruderJobDetails`].
+/// Returned by [`IntruderManager::get_job_details`] and serialised to
+/// the REST API.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntruderJobDetails {
+    /// Current progress snapshot.
     pub snapshot: IntruderJobSnapshot,
+    /// The first `result_limit` results (oldest first).
     pub results: Vec<IntruderResult>,
 }
 
@@ -136,12 +196,16 @@ struct IntruderJobState {
     results: Vec<IntruderResult>,
 }
 
-#[derive(Clone)]
-/// Represents `IntruderManager`.
+/// Shared, cheaply cloneable handle to the intruder subsystem.
 ///
-/// See also: [`IntruderManager`].
+/// Internally wraps a [`DashMap`] of live jobs and a
+/// [`broadcast::Sender`] for event
+/// distribution. Safe to share across threads and Tokio tasks.
+#[derive(Clone)]
 pub struct IntruderManager {
+    /// All known jobs keyed by UUID.
     jobs: Arc<DashMap<Uuid, Arc<RwLock<IntruderJobState>>>>,
+    /// Fan-out channel for [`IntruderEvent`]s.
     events_tx: broadcast::Sender<IntruderEvent>,
 }
 
@@ -156,27 +220,26 @@ impl Default for IntruderManager {
 }
 
 impl IntruderManager {
-    /// Subscribes to `events`.
+    /// Returns a new receiver for the intruder event broadcast channel.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Each receiver independently sees every [`IntruderEvent`] emitted
+    /// after it subscribes. Lagging receivers will lose older events.
     pub fn subscribe_events(&self) -> broadcast::Receiver<IntruderEvent> {
         self.events_tx.subscribe()
     }
 
-    /// Executes `start job`.
+    /// Validates the spec, computes payload vectors, and spawns a
+    /// background Tokio task that sends the requests.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the job's UUID immediately; progress is streamed via
+    /// [`subscribe_events`](Self::subscribe_events).
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if:
+    /// - a payload key is empty or duplicated,
+    /// - a payload set contains no values, or
+    /// - the cartesian product exceeds 100 000 combinations.
     pub async fn start_job(&self, spec: IntruderJobSpec) -> Result<Uuid> {
         validate_payload_sets(&spec.payload_sets)?;
         let payload_vectors = build_payload_vectors(&spec.payload_sets, spec.strategy.clone())?;
@@ -220,13 +283,8 @@ impl IntruderManager {
         Ok(id)
     }
 
-    /// Lists `jobs`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns snapshots for every known job, sorted oldest-first by
+    /// creation time.
     pub async fn list_jobs(&self) -> Vec<IntruderJobSnapshot> {
         let mut rows = Vec::with_capacity(self.jobs.len());
         for row in &*self.jobs {
@@ -236,25 +294,17 @@ impl IntruderManager {
         rows
     }
 
-    /// Gets `job`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the current snapshot for a single job, or `None` if 
+    /// the UUID is unknown.
     pub async fn get_job(&self, id: Uuid) -> Option<IntruderJobSnapshot> {
         let state = self.jobs.get(&id)?;
         Some(state.read().await.snapshot.clone())
     }
 
-    /// Gets `job results`.
+    /// Returns a page of [`IntruderResult`]s for the given job.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// `offset` and `limit` are applied to the internal results vector
+    /// (oldest first). Returns `None` if the job UUID is unknown.
     pub async fn get_job_results(
         &self,
         id: Uuid,
@@ -273,13 +323,8 @@ impl IntruderManager {
         Some(rows)
     }
 
-    /// Gets `job details`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the snapshot together with the first `result_limit`
+    /// results for a single job.
     pub async fn get_job_details(
         &self,
         id: Uuid,
@@ -293,13 +338,9 @@ impl IntruderManager {
         })
     }
 
-    /// Removes `job`.
+    /// Removes a job and all its results from memory.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `true` if the job existed.
     pub fn remove_job(&self, id: Uuid) -> bool {
         self.jobs.remove(&id).is_some()
     }
@@ -610,12 +651,23 @@ fn build_sniper(payload_sets: &[IntruderPayloadSet]) -> Vec<BTreeMap<String, Str
     out
 }
 
-/// Renders `template`.
+/// Substitutes `{{key}}` placeholders in `template` with values from
+/// `payloads`.
 ///
 /// # Examples
+///
 /// ```
-/// use roxy_core as _;
-/// assert!(true);
+/// use std::collections::BTreeMap;
+/// use roxy_core::intruder::render_template;
+///
+/// let payloads = BTreeMap::from([
+///     ("host".to_string(), "example.com".to_string()),
+///     ("id".to_string(), "42".to_string()),
+/// ]);
+/// assert_eq!(
+///     render_template("https://{{host}}/a/{{id}}", &payloads),
+///     "https://example.com/a/42",
+/// );
 /// ```
 pub fn render_template(template: &str, payloads: &BTreeMap<String, String>) -> String {
     let mut rendered = template.to_string();

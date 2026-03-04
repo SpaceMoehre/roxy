@@ -1,3 +1,14 @@
+//! Upstream TLS client connector.
+//!
+//! Provides a lazily-initialised, globally-cached [`SslConnector`]
+//! pre-configured with:
+//!
+//! * TLS 1.2–1.3
+//! * **X25519MLKEM768** post-quantum key exchange (falls back to
+//!   X25519 on older BoringSSL builds)
+//! * **Brotli** certificate decompression
+//! * **ALPN** for `h2` + `http/1.1`
+
 use std::{
     io,
     sync::{Arc, OnceLock},
@@ -9,6 +20,12 @@ use boring::ssl::{
 };
 use tracing::warn;
 
+/// Returns a shared, immutable [`SslConnector`] suitable for outbound
+/// HTTPS requests.
+///
+/// Two separate connectors are cached: one that verifies peer
+/// certificates and one that does not.  The connector is built once
+/// on first call and reused for the lifetime of the process.
 pub fn client_connector(accept_invalid_certs: bool) -> Arc<SslConnector> {
     static STRICT: OnceLock<Arc<SslConnector>> = OnceLock::new();
     static INSECURE: OnceLock<Arc<SslConnector>> = OnceLock::new();

@@ -1,3 +1,35 @@
+//! roxy application entry-point.
+//!
+//! Wires together the proxy engine ([`roxy_core`]), REST API
+//! ([`roxy_api`]), WebSocket hub, plugin manager ([`roxy_plugin`]),
+//! and persistent storage ([`roxy_storage`]) into a single
+//! multi-listener server.
+//!
+//! ## Architecture
+//!
+//! An **ingress TCP listener** accepts all traffic on the configured
+//! `ROXY_BIND` address and routes each connection to one of:
+//!
+//! * **HTTP CONNECT / proxy traffic** → forwarded to the
+//!   [`ProxyEngine`] over a local loopback
+//!   socket.
+//! * **REST API requests** (`/api/*`, static assets) → forwarded to the
+//!   `ntex` HTTP server over a Unix domain socket.
+//! * **WebSocket upgrades** (`/ws`) → forwarded to the
+//!   tokio-tungstenite listener over a Unix domain socket.
+//!
+//! ## Configuration
+//!
+//! All configuration is via environment variables:
+//!
+//! | Variable | Default | Description |
+//! |---|---|---|
+//! | `ROXY_BIND` | `127.0.0.1:8080` | Ingress listen address |
+//! | `ROXY_DATA_DIR` | `.roxy-data` | Persistent data directory |
+//! | `ROXY_DEBUG_LOGGING` | `false` | Enable verbose proxy tracing |
+//! | `ROXY_DEBUG_LOG_BODIES` | `false` | Include body previews in traces |
+//! | `ROXY_DEBUG_LOG_BODY_LIMIT` | `2048` | Max bytes per body preview |
+
 use std::{
     env, fs, io,
     net::SocketAddr,
@@ -802,6 +834,9 @@ fn infer_plugin_hooks(script: &Path) -> Vec<String> {
         "on_response_pre_capture",
         "decoder",
         "enumerate",
+        "crawl",
+        "update",
+        "status",
     ];
 
     let source = match fs::read_to_string(script) {

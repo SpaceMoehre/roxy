@@ -1,6 +1,24 @@
-//! roxy_core `state` module.
+//! Central shared proxy state.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! [`AppState`] is the single source of truth for every runtime toggle and
+//! queue that the proxy engine, the API layer, and the WebSocket hub need to
+//! coordinate on:
+//!
+//! * **Intercept toggles** — enable/disable request and response interception
+//!   and MITM mode.
+//! * **Pending intercept queues** — requests and responses waiting for user
+//!   decisions (forward / mutate / drop), backed by
+//!   [`oneshot`] channels.
+//! * **Site map** — accumulated host + path tree built while traffic flows
+//!   through the proxy, filtered by scope.
+//! * **Scope** — a set of host patterns (optionally wildcard-prefixed, e.g.
+//!   `*.example.com`) that restrict which hosts enter the site map.
+//! * **Upstream proxy settings** — optional proxy chain configuration
+//!   (HTTP / HTTPS / SOCKS4 / SOCKS5, strict-chain / random-chain).
+//!
+//! Every mutation publishes an [`AppStateEvent`] through a
+//! [`broadcast`] channel so the WebSocket hub can
+//! push real-time updates to the dashboard.
 
 use std::sync::{
     Arc, Mutex, RwLock,
@@ -15,125 +33,144 @@ use uuid::Uuid;
 
 use crate::model::{CapturedRequest, CapturedResponse, RequestMutation, ResponseMutation};
 
+/// The proxy engine's decision for an intercepted request.
 #[derive(Debug)]
-/// Enumerates `InterceptDecision` variants.
-///
-/// See also: [`InterceptDecision`].
 pub enum InterceptDecision {
+    /// Pass the request through to the upstream server unchanged.
     Forward,
+    /// Replace the request's raw blob before forwarding.
     Mutate(RequestMutation),
+    /// Discard the request entirely; the client receives a `403 Forbidden`.
     Drop,
 }
 
+/// The proxy engine's decision for an intercepted response.
 #[derive(Debug)]
-/// Enumerates `ResponseInterceptDecision` variants.
-///
-/// See also: [`ResponseInterceptDecision`].
 pub enum ResponseInterceptDecision {
+    /// Deliver the response to the client unchanged.
     Forward,
+    /// Replace status / headers / body before delivery.
     Mutate(ResponseMutation),
+    /// Discard the response; the client receives a `403 Forbidden`.
     Drop,
 }
 
+/// Transport protocol for an upstream proxy hop.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Enumerates `UpstreamProxyProtocol` variants.
-///
-/// See also: [`UpstreamProxyProtocol`].
 pub enum UpstreamProxyProtocol {
+    /// Plain-text HTTP CONNECT tunnel.
     Http,
+    /// TLS-wrapped HTTP CONNECT tunnel.
     Https,
+    /// SOCKS4/4a tunnel.
     Socks4,
+    /// SOCKS5 tunnel (no-auth only).
     Socks5,
 }
 
+/// A single hop in the upstream proxy chain.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-/// Represents `UpstreamProxyEntry`.
-///
-/// See also: [`UpstreamProxyEntry`].
 pub struct UpstreamProxyEntry {
+    /// Transport protocol for this hop.
     pub protocol: UpstreamProxyProtocol,
+    /// Hostname or IP address of the proxy.
     pub address: String,
+    /// TCP port of the proxy.
     pub port: u16,
 }
 
+/// How to select hops from the configured proxy list.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Enumerates `UpstreamChainMode` variants.
-///
-/// See also: [`UpstreamChainMode`].
 pub enum UpstreamChainMode {
+    /// Use every proxy in order.
     StrictChain,
+    /// Randomly select and shuffle a subset of proxies per connection, bounded
+    /// by [`UpstreamProxySettings::min_chain_length`] and
+    /// [`UpstreamProxySettings::max_chain_length`].
     RandomChain,
 }
 
+/// Complete configuration for upstream proxy chaining.
+///
+/// Implements [`Default`] with an empty proxy list and strict-chain mode.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-/// Represents `UpstreamProxySettings`.
-///
-/// See also: [`UpstreamProxySettings`].
 pub struct UpstreamProxySettings {
+    /// Ordered list of proxy hops.
     pub proxies: Vec<UpstreamProxyEntry>,
+    /// When `true`, DNS resolution is delegated to the first proxy in the
+    /// chain rather than being resolved locally.
     pub proxy_dns: bool,
+    /// Chain selection strategy.
     pub chain_mode: UpstreamChainMode,
+    /// Minimum number of hops in random-chain mode (clamped to ≥ 1).
     pub min_chain_length: usize,
+    /// Maximum number of hops in random-chain mode (clamped to ≥ `min`).
     pub max_chain_length: usize,
 }
 
+/// Snapshot of the three proxy toggle switches (request intercept, response
+/// intercept, MITM).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `ProxyToggleSnapshot`.
-///
-/// See also: [`ProxyToggleSnapshot`].
 pub struct ProxyToggleSnapshot {
+    /// Whether request interception is currently active.
     pub intercept_enabled: bool,
+    /// Whether response interception is currently active.
     pub intercept_response_enabled: bool,
+    /// Whether HTTPS CONNECT tunnels are intercepted (MITM mode).
     pub mitm_enabled: bool,
 }
 
+/// Snapshot of all queued intercept requests and responses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `PendingInterceptSnapshot`.
-///
-/// See also: [`PendingInterceptSnapshot`].
 pub struct PendingInterceptSnapshot {
+    /// Requests waiting for a user decision.
     pub requests: Vec<CapturedRequest>,
+    /// Responses waiting for a user decision.
     pub responses: Vec<CapturedResponse>,
 }
 
+/// One row in the site map — a host and its observed paths.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-/// Represents `SiteMapEntry`.
-///
-/// See also: [`SiteMapEntry`].
 pub struct SiteMapEntry {
+    /// Hostname (lowercased).
     pub host: String,
+    /// Sorted list of unique request paths seen for this host.
     pub paths: Vec<String>,
 }
 
+/// Complete site map snapshot, ordered by host name.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `SiteMapSnapshot`.
-///
-/// See also: [`SiteMapSnapshot`].
 pub struct SiteMapSnapshot {
+    /// Sorted list of host → paths entries.
     pub rows: Vec<SiteMapEntry>,
 }
 
+/// Snapshot of the current scope host patterns.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `ScopeSnapshot`.
-///
-/// See also: [`ScopeSnapshot`].
 pub struct ScopeSnapshot {
+    /// Sorted list of scope host patterns (e.g. `["*.example.com"]`).
     pub hosts: Vec<String>,
 }
 
+/// Event broadcast by [`AppState`] whenever a toggle, queue, site map, scope,
+/// or upstream proxy setting changes.
+///
+/// Tagged serde representation: `{"event": "<variant>", "payload": {…}}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
-/// Enumerates `AppStateEvent` variants.
-///
-/// See also: [`AppStateEvent`].
 pub enum AppStateEvent {
+    /// One or more proxy toggles changed.
     ProxyToggles(ProxyToggleSnapshot),
+    /// The set of pending intercept requests/responses changed.
     PendingIntercepts(PendingInterceptSnapshot),
+    /// A new host or path was added to the site map.
     SiteMapUpdated(SiteMapSnapshot),
+    /// The scope host list was modified.
     ScopeUpdated(ScopeSnapshot),
+    /// Upstream proxy chain settings were updated.
     UpstreamProxySettingsUpdated(UpstreamProxySettings),
 }
 
@@ -150,13 +187,8 @@ impl Default for UpstreamProxySettings {
 }
 
 impl UpstreamProxySettings {
-    /// Executes `normalized`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a sanitised copy with empty/zero entries removed and chain
+    /// length bounds clamped to sensible minimums.
     pub fn normalized(mut self) -> Self {
         self.proxies = self
             .proxies
@@ -175,23 +207,22 @@ impl UpstreamProxySettings {
     }
 }
 
-#[derive(Debug)]
-/// Represents `PendingIntercept`.
+/// A request that is parked in the intercept queue waiting for a user
+/// decision.
 ///
-/// See also: [`PendingIntercept`].
+/// Created by [`AppState::enqueue_intercept`] and resolved by
+/// [`AppState::continue_intercept`].
+#[derive(Debug)]
 pub struct PendingIntercept {
+    /// The captured request awaiting a decision.
     pub request: CapturedRequest,
+    /// One-shot channel used to deliver the [`InterceptDecision`].
     sender: Mutex<Option<oneshot::Sender<InterceptDecision>>>,
 }
 
 impl PendingIntercept {
-    /// Constructs a new instance.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Creates a new pending intercept and returns the `Arc`-wrapped handle
+    /// together with the receiver the proxy engine awaits on.
     pub fn new(request: CapturedRequest) -> (Arc<Self>, oneshot::Receiver<InterceptDecision>) {
         let (tx, rx) = oneshot::channel();
         (
@@ -215,23 +246,22 @@ impl PendingIntercept {
     }
 }
 
-#[derive(Debug)]
-/// Represents `PendingResponseIntercept`.
+/// A response that is parked in the intercept queue waiting for a user
+/// decision.
 ///
-/// See also: [`PendingResponseIntercept`].
+/// Created by [`AppState::enqueue_response_intercept`] and resolved by
+/// [`AppState::continue_response_intercept`].
+#[derive(Debug)]
 pub struct PendingResponseIntercept {
+    /// The captured response awaiting a decision.
     pub response: CapturedResponse,
+    /// One-shot channel used to deliver the [`ResponseInterceptDecision`].
     sender: Mutex<Option<oneshot::Sender<ResponseInterceptDecision>>>,
 }
 
 impl PendingResponseIntercept {
-    /// Constructs a new instance.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Creates a new pending response intercept and returns the `Arc`-wrapped
+    /// handle together with the receiver.
     pub fn new(
         response: CapturedResponse,
     ) -> (Arc<Self>, oneshot::Receiver<ResponseInterceptDecision>) {
@@ -257,10 +287,8 @@ impl PendingResponseIntercept {
     }
 }
 
+/// Errors returned by intercept queue operations.
 #[derive(Debug, Error)]
-/// Enumerates `StateError` variants.
-///
-/// See also: [`StateError`].
 pub enum StateError {
     #[error("request not found in intercept queue")]
     NotFound,
@@ -272,10 +300,12 @@ pub enum StateError {
     InternalLock,
 }
 
-#[derive(Debug)]
-/// Represents `AppState`.
+/// Central mutable state shared by the proxy engine, API layer, and
+/// WebSocket hub.
 ///
-/// See also: [`AppState`].
+/// All fields are lock-free or use fine-grained interior mutability so
+/// concurrent access from many tasks does not become a bottleneck.
+#[derive(Debug)]
 pub struct AppState {
     intercept_enabled: AtomicBool,
     intercept_response_enabled: AtomicBool,
@@ -295,13 +325,8 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Constructs a new instance.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Creates a fresh `AppState` with interception disabled, MITM enabled,
+    /// empty site map, empty scope, and default upstream proxy settings.
     pub fn new() -> Self {
         let (events_tx, _) = broadcast::channel(2048);
         Self {
@@ -317,13 +342,8 @@ impl AppState {
         }
     }
 
-    /// Subscribes to `events`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a new [`broadcast::Receiver`] that will receive every
+    /// [`AppStateEvent`] published after the subscription is created.
     pub fn subscribe_events(&self) -> broadcast::Receiver<AppStateEvent> {
         self.events_tx.subscribe()
     }
@@ -363,24 +383,15 @@ impl AppState {
         }
     }
 
-    /// Executes `intercept enabled`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `true` when request interception is active.
     pub fn intercept_enabled(&self) -> bool {
         self.intercept_enabled.load(Ordering::Relaxed)
     }
 
-    /// Sets `intercept enabled`.
+    /// Enables or disables request interception.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// When disabled, all currently pending intercepts are automatically
+    /// flushed with [`InterceptDecision::Forward`].
     pub fn set_intercept_enabled(&self, enabled: bool) {
         self.intercept_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
@@ -392,60 +403,32 @@ impl AppState {
         ));
     }
 
-    /// Executes `intercept response enabled`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `true` when response interception is active.
     pub fn intercept_response_enabled(&self) -> bool {
         self.intercept_response_enabled.load(Ordering::Relaxed)
     }
 
-    /// Sets `intercept response enabled`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Enables or disables response interception.
     pub fn set_intercept_response_enabled(&self, enabled: bool) {
         self.intercept_response_enabled
             .store(enabled, Ordering::Relaxed);
         self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
-    /// Executes `mitm enabled`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `true` when HTTPS CONNECT tunnels are intercepted (MITM mode).
     pub fn mitm_enabled(&self) -> bool {
         self.mitm_enabled.load(Ordering::Relaxed)
     }
 
-    /// Sets `mitm enabled`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Enables or disables MITM interception for HTTPS CONNECT tunnels.
     pub fn set_mitm_enabled(&self, enabled: bool) {
         self.mitm_enabled.store(enabled, Ordering::Relaxed);
         self.publish_event(AppStateEvent::ProxyToggles(self.proxy_toggle_snapshot()));
     }
 
-    /// Executes `enqueue intercept`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Parks `request` in the pending intercept queue and returns a
+    /// [`oneshot::Receiver`] that the proxy engine awaits to learn the user's
+    /// decision.
     pub fn enqueue_intercept(
         &self,
         request: CapturedRequest,
@@ -459,16 +442,12 @@ impl AppState {
         rx
     }
 
-    /// Executes `continue intercept`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Resolves a pending request intercept with the given `decision`.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns [`StateError::NotFound`] if `id` is not in the queue, or
+    /// [`StateError::AlreadyResolved`] if it was already resolved.
     pub fn continue_intercept(
         &self,
         id: Uuid,
@@ -485,13 +464,8 @@ impl AppState {
         result
     }
 
-    /// Executes `pending requests`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a snapshot of all currently queued request intercepts, sorted
+    /// by creation timestamp.
     pub fn pending_requests(&self) -> Vec<CapturedRequest> {
         let mut rows: Vec<CapturedRequest> = self
             .pending_intercepts
@@ -518,13 +492,8 @@ impl AppState {
         ));
     }
 
-    /// Executes `enqueue response intercept`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Parks `response` in the pending response intercept queue and returns
+    /// a receiver for the user's decision.
     pub fn enqueue_response_intercept(
         &self,
         response: CapturedResponse,
@@ -538,16 +507,11 @@ impl AppState {
         rx
     }
 
-    /// Executes `continue response intercept`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Resolves a pending response intercept with the given `decision`.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns [`StateError::NotFound`] if `id` is not in the queue.
     pub fn continue_response_intercept(
         &self,
         id: Uuid,
@@ -564,13 +528,8 @@ impl AppState {
         result
     }
 
-    /// Executes `pending responses`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a snapshot of all currently queued response intercepts, sorted
+    /// by creation timestamp.
     pub fn pending_responses(&self) -> Vec<CapturedResponse> {
         let mut rows: Vec<CapturedResponse> = self
             .pending_response_intercepts
@@ -581,13 +540,10 @@ impl AppState {
         rows
     }
 
-    /// Executes `register site path`.
+    /// Records a `(host, path)` pair in the site map.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// The host is lowercased and checked against the current scope; if out
+    /// of scope the call is a no-op.  Duplicate paths are silently ignored.
     pub fn register_site_path(&self, host: impl Into<String>, path: impl Into<String>) {
         let host = host.into().trim().to_ascii_lowercase();
         if !self.host_in_scope(&host) {
@@ -600,13 +556,7 @@ impl AppState {
         }
     }
 
-    /// Executes `site map`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the full site map as a sorted `Vec` of `(host, paths)` pairs.
     pub fn site_map(&self) -> Vec<(String, Vec<String>)> {
         let mut out = Vec::new();
         for host in &self.site_map {
@@ -618,13 +568,11 @@ impl AppState {
         out
     }
 
-    /// Sets `scope hosts`.
+    /// Replaces the entire scope host list.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Each entry is lowercased; empty strings are discarded.  Wildcard
+    /// patterns like `*.example.com` match the domain itself and all
+    /// sub-domains.
     pub fn set_scope_hosts(&self, hosts: Vec<String>) {
         self.scope_hosts.clear();
         for host in hosts {
@@ -636,13 +584,7 @@ impl AppState {
         self.publish_event(AppStateEvent::ScopeUpdated(self.scope_snapshot()));
     }
 
-    /// Adds `scope host`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Adds a single host pattern to the scope.
     pub fn add_scope_host(&self, host: String) {
         let normalized = normalize_scope_host(&host);
         if !normalized.is_empty() {
@@ -651,13 +593,8 @@ impl AppState {
         }
     }
 
-    /// Removes `scope host`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Removes a host pattern from the scope.  Returns `true` if it was
+    /// present.
     pub fn remove_scope_host(&self, host: &str) -> bool {
         let normalized = normalize_scope_host(host);
         let removed = self.scope_hosts.remove(&normalized).is_some();
@@ -667,26 +604,14 @@ impl AppState {
         removed
     }
 
-    /// Executes `scope hosts`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the current scope host patterns, sorted alphabetically.
     pub fn scope_hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.scope_hosts.iter().map(|h| h.clone()).collect();
         hosts.sort();
         hosts
     }
 
-    /// Executes `upstream proxy settings`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a clone of the current upstream proxy settings.
     pub fn upstream_proxy_settings(&self) -> UpstreamProxySettings {
         self.upstream_proxy_settings
             .read()
@@ -694,13 +619,7 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Sets `upstream proxy settings`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Replaces the upstream proxy settings, normalising the input first.
     pub fn set_upstream_proxy_settings(&self, settings: UpstreamProxySettings) {
         if let Ok(mut value) = self.upstream_proxy_settings.write() {
             *value = settings.normalized();
@@ -708,6 +627,8 @@ impl AppState {
         }
     }
 
+    /// Returns `true` when `host` matches at least one scope pattern, or
+    /// when the scope is empty ("everything is in scope").
     fn host_in_scope(&self, host: &str) -> bool {
         if self.scope_hosts.is_empty() {
             return true;
@@ -731,6 +652,7 @@ impl AppState {
     }
 }
 
+/// Trims whitespace and lowercases a scope host pattern.
 fn normalize_scope_host(host: &str) -> String {
     host.trim().to_ascii_lowercase()
 }

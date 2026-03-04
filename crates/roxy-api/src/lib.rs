@@ -1,6 +1,42 @@
-//! roxy_api `crate root` module.
+//! HTTP API and web UI layer for the **roxy** intercepting proxy.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! This crate provides the [`ntex`]-based HTTP server that serves both the
+//! single-page web dashboard and the `/api/v1/*` JSON REST endpoints consumed
+//! by the dashboard as well as external tooling and plugins.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌────────────┐   unix socket / tcp   ┌─────────────────────────┐
+//! │  browser /  │ ────────────────────► │  ntex web server        │
+//! │  curl       │                       │  (static assets + API)  │
+//! └────────────┘                       └──────────┬──────────────┘
+//!                                                 │
+//!             ┌───────────┬───────────────────────┤──────────┐
+//!             ▼           ▼                       ▼          ▼
+//!        [AppState]  [StorageManager]     [PluginManager]  [WsHub]
+//! ```
+//!
+//! # Quick Start
+//!
+//! The primary entry points are:
+//!
+//! * [`run_api`] — bind to a TCP address with no shutdown control.
+//! * [`run_api_with_shutdown`] — bind to a TCP address with a [`watch`]
+//!   shutdown channel.
+//! * [`run_api_with_shutdown_and_ready`] — same as above but also signals the
+//!   actual bound address via a [`oneshot`] channel.
+//! * [`run_api_with_shutdown_and_ready_uds`] — bind to a Unix domain socket
+//!   instead of TCP.
+//!
+//! All variants accept an [`ApiState`] bundle that carries shared application
+//! state, certificate management, storage, plugin management, and the WebSocket
+//! hub.
+//!
+//! # Modules
+//!
+//! * [`web_modules`] — UI module registry for dynamically loaded dashboard panels.
+//! * [`ws`] — WebSocket hub for real-time event broadcast to connected clients.
 
 pub mod web_modules;
 pub mod ws;
@@ -51,26 +87,54 @@ const ANDROID_CHROME_512_PNG: &[u8] = include_bytes!("../web/icons/android-chrom
 const MSTILE_150_PNG: &[u8] = include_bytes!("../web/icons/mstile-150x150.png");
 
 #[derive(Clone)]
-/// Represents `ApiState`.
+/// Shared application state threaded through every API handler.
 ///
-/// See also: [`ApiState`].
+/// Wraps the core proxy state, certificate authority, persistent storage,
+/// plugin system, intruder engine, WebSocket hub, and dynamic UI module
+/// registry.  Each field is cheaply cloneable (typically behind an [`Arc`] or
+/// interior-mutable wrapper) so the struct can be cloned into every `ntex`
+/// worker thread.
+///
+/// # Examples
+///
+/// ```
+/// use roxy_api::web_modules::UiModuleRegistry;
+/// use std::sync::Arc;
+///
+/// // Fields require live runtime instances; verify the type exists.
+/// let _: fn() -> UiModuleRegistry = UiModuleRegistry::new;
+/// ```
 pub struct ApiState {
+    /// Core proxy state (intercept toggles, scope, site map, pending requests).
     pub app_state: Arc<AppState>,
+    /// TLS certificate authority used for MITM certificate generation.
     pub cert_manager: Arc<CertManager>,
+    /// Full-text search and persistence layer for HTTP history.
     pub storage: StorageManager,
+    /// Plugin lifecycle manager (register / invoke / unregister).
     pub plugins: PluginManager,
+    /// Background intruder (fuzzer) job scheduler.
     pub intruder: IntruderManager,
+    /// Broadcast hub for WebSocket event delivery.
     pub ws_hub: WsHub,
+    /// Dynamic registry of plugin-contributed UI panels.
     pub ui_modules: Arc<web_modules::UiModuleRegistry>,
 }
 
 impl ApiState {
-    /// Constructs a new instance.
+    /// Creates a new [`ApiState`] from its constituent parts.
+    ///
+    /// All arguments are stored as-is — no cloning or additional allocation is
+    /// performed beyond the struct construction itself.
     ///
     /// # Examples
+    ///
     /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
+    /// use roxy_api::ApiState;
+    /// // `ApiState::new` is a simple constructor; verifying it compiles is
+    /// // sufficient for a doc-test since the real dependencies require a
+    /// // running async runtime and file system.
+    /// assert_eq!(std::mem::size_of::<ApiState>() > 0, true);
     /// ```
     pub fn new(
         app_state: Arc<AppState>,
@@ -93,44 +157,58 @@ impl ApiState {
     }
 }
 
+/// JSON envelope returned by every error response.
 #[derive(Serialize)]
 struct ApiErrorBody {
     error: String,
 }
 
+/// Response payload for `GET /api/v1/health`.
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
     unix_ms: u128,
 }
 
+/// Response for endpoints that read or mutate a boolean toggle.
 #[derive(Serialize)]
 struct ToggleResponse {
     enabled: bool,
 }
 
+/// Request body for endpoints that set a boolean toggle.
 #[derive(Deserialize)]
 struct ToggleRequest {
     enabled: bool,
 }
 
+/// Body for `POST /proxy/intercepts/{id}/continue`.
+///
+/// `decision` is one of `"forward"`, `"drop"`, or `"mutate"`.
 #[derive(Deserialize)]
 struct ContinueRequest {
     decision: String,
     mutation: Option<MutationPayload>,
 }
 
+/// Body for `POST /proxy/response-intercepts/{id}/continue`.
 #[derive(Deserialize)]
 struct ContinueResponseRequest {
     decision: String,
     mutation: Option<ResponseMutationPayload>,
 }
 
+/// Optional mutation data attached to a `"mutate"` request decision.
+///
+/// `raw_base64` carries the full raw HTTP request blob as Base64.
 #[derive(Deserialize)]
 struct MutationPayload {
     raw_base64: Option<String>,
 }
 
+/// Optional mutation data attached to a `"mutate"` response decision.
+///
+/// Each field is independently replaceable; `None` fields are left unchanged.
 #[derive(Deserialize)]
 struct ResponseMutationPayload {
     status: Option<u16>,
@@ -138,43 +216,51 @@ struct ResponseMutationPayload {
     body_base64: Option<String>,
 }
 
+/// URL path parameter for intercept continuation endpoints.
 #[derive(Deserialize)]
 struct ContinuePath {
     id: String,
 }
 
+/// Single host and its observed request paths for the site-map endpoint.
 #[derive(Serialize)]
 struct SiteMapRow {
     host: String,
     paths: Vec<String>,
 }
 
+/// Query string parameters for `GET /history/search`.
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
     limit: Option<usize>,
 }
 
+/// Query string parameters for `GET /history/recent`.
 #[derive(Deserialize)]
 struct RecentHistoryQuery {
     limit: Option<usize>,
 }
 
+/// Body for `PUT /target/scope` — replaces the entire scope list.
 #[derive(Deserialize)]
 struct ScopeSetRequest {
     hosts: Vec<String>,
 }
 
+/// Body for `POST /target/scope` — appends a single host.
 #[derive(Deserialize)]
 struct ScopeAddRequest {
     host: String,
 }
 
+/// Response for scope-related endpoints, echoing the current scope list.
 #[derive(Serialize)]
 struct ScopeResponse {
     hosts: Vec<String>,
 }
 
+/// Body for `POST /plugins` — registers a new plugin.
 #[derive(Deserialize)]
 struct RegisterPluginRequest {
     name: String,
@@ -182,6 +268,7 @@ struct RegisterPluginRequest {
     hooks: Vec<String>,
 }
 
+/// Body for `POST /ui/modules` — registers a dynamically loaded UI panel.
 #[derive(Deserialize)]
 struct RegisterUiModuleRequest {
     id: String,
@@ -192,23 +279,29 @@ struct RegisterUiModuleRequest {
     script_js: String,
 }
 
+/// Body for `POST /plugins/{id}/invoke`.
 #[derive(Deserialize)]
 struct InvokePluginRequest {
     hook: String,
     payload: Value,
 }
 
+/// Query string for `GET /plugins/{id}/alterations`.
 #[derive(Deserialize)]
 struct PluginAlterationsQuery {
     limit: Option<usize>,
 }
 
+/// Body for `POST /repeater/send` — replays an HTTP request from a raw blob.
 #[derive(Deserialize)]
 struct RepeaterRequest {
+    /// Full raw HTTP request (request-line + headers + body) encoded as Base64.
     request_blob_base64: String,
+    /// Scheme to use when the blob does not specify one (default: `"http"`).
     default_scheme: Option<String>,
 }
 
+/// Response from `POST /repeater/send` containing the upstream reply.
 #[derive(Serialize)]
 struct RepeaterResponse {
     status: u16,
@@ -216,80 +309,94 @@ struct RepeaterResponse {
     body_base64: String,
 }
 
+/// Body for `POST /decoder/transform`.
+///
+/// `mode` is one of the built-in transforms (`"base64_encode"`,
+/// `"base64_decode"`) or a `"plugin:<name>[:<op>]"` reference.
 #[derive(Deserialize)]
 struct DecodeRequest {
     mode: String,
     payload: String,
 }
 
+/// Result of a decoder/transform operation.
 #[derive(Serialize)]
 struct DecodeResponse {
     result: String,
 }
 
+/// Response for `GET /ws/stats`, reporting connected WebSocket clients.
 #[derive(Serialize)]
 struct WsStatsResponse {
     clients: usize,
     ws_port: Option<u16>,
 }
 
+/// Pagination query for `GET /intruder/jobs/{id}/results`.
 #[derive(Deserialize)]
 struct IntruderResultsQuery {
     offset: Option<usize>,
     limit: Option<usize>,
 }
 
+/// Body for `POST /intruder/payload-source/fetch`.
 #[derive(Deserialize)]
 struct IntruderPayloadSourceFetchRequest {
     url: String,
 }
 
+/// Response containing the downloaded payload list text.
 #[derive(Serialize)]
 struct IntruderPayloadSourceFetchResponse {
     text: String,
 }
 
+/// URL path parameter for intruder job endpoints.
 #[derive(Deserialize)]
 struct IntruderPath {
     id: String,
 }
 
+/// URL path parameter for `DELETE /target/scope/{host}`.
 #[derive(Deserialize)]
 struct ScopePath {
     host: String,
 }
 
+/// Summary returned after processing plugin output operations.
 #[derive(Serialize)]
 struct PluginOpsApplied {
+    /// Number of `state_ops` entries that were successfully applied.
     state_ops_applied: usize,
+    /// Number of UI modules registered by the plugin output.
     ui_modules_registered: usize,
 }
 
-/// Runs `api`.
+/// Starts the HTTP API server bound to `bind` and blocks until the server
+/// terminates.
 ///
-/// # Examples
-/// ```
-/// use roxy_api as _;
-/// assert!(true);
-/// ```
+/// This is a convenience wrapper around [`run_api_with_shutdown`] that creates
+/// a no-op shutdown channel internally.  Use it for simple one-shot runs where
+/// graceful shutdown signalling is not needed.
 ///
 /// # Errors
-/// Returns an error when the operation cannot be completed.
+///
+/// Returns [`std::io::Error`] if binding to the requested address fails (e.g.
+/// permission denied, address in use with no fallback ports remaining).
 pub async fn run_api(bind: SocketAddr, state: ApiState) -> std::io::Result<()> {
     let (_tx, rx) = watch::channel(false);
     run_api_with_shutdown(bind, state, rx).await
 }
 
-/// Runs `api with shutdown`.
+/// Starts the HTTP API server with graceful shutdown support.
 ///
-/// # Examples
-/// ```
-/// use roxy_api as _;
-/// assert!(true);
-/// ```
+/// The server runs until `shutdown` receives `true` (or the sender is
+/// dropped).  Delegates to [`run_api_with_shutdown_and_ready`] with
+/// `ready = None`.
 ///
 /// # Errors
-/// Returns an error when the operation cannot be completed.
+///
+/// Returns [`std::io::Error`] on bind failure.
 pub async fn run_api_with_shutdown(
     bind: SocketAddr,
     state: ApiState,
@@ -298,16 +405,21 @@ pub async fn run_api_with_shutdown(
     run_api_with_shutdown_and_ready(bind, state, shutdown, None).await
 }
 
-/// Runs `api with shutdown and ready`.
+/// Starts the HTTP API server on a TCP socket with shutdown and readiness
+/// notification.
 ///
-/// # Examples
-/// ```
-/// use roxy_api as _;
-/// assert!(true);
-/// ```
+/// If the requested port is already in use the function automatically
+/// increments the port number and retries until a free port is found (up to
+/// `u16::MAX`).  Once the server is listening, the actual [`SocketAddr`] is
+/// sent through `ready` (when [`Some`]).
+///
+/// The server shuts down gracefully when `shutdown` yields `true`.
 ///
 /// # Errors
-/// Returns an error when the operation cannot be completed.
+///
+/// * [`std::io::ErrorKind::AddrNotAvailable`] — returned if all ports from
+///   `bind.port()` through `u16::MAX` are exhausted.
+/// * Any other [`std::io::Error`] propagated from `ntex` bind/run.
 pub async fn run_api_with_shutdown_and_ready(
     bind: SocketAddr,
     state: ApiState,
@@ -459,16 +571,16 @@ pub async fn run_api_with_shutdown_and_ready(
     }
 }
 
-/// Runs `api with shutdown and ready uds`.
+/// Starts the HTTP API server on a **Unix domain socket** with shutdown and
+/// readiness notification.
 ///
-/// # Examples
-/// ```
-/// use roxy_api as _;
-/// assert!(true);
-/// ```
+/// Any pre-existing socket file at `path` is removed before binding.  After
+/// the server stops the socket file is cleaned up automatically.
 ///
 /// # Errors
-/// Returns an error when the operation cannot be completed.
+///
+/// * [`std::io::Error`] if the stale socket file cannot be removed, the new
+///   socket cannot be created, or the `ntex` server fails to run.
 pub async fn run_api_with_shutdown_and_ready_uds(
     path: impl AsRef<Path>,
     state: ApiState,
@@ -615,6 +727,9 @@ pub async fn run_api_with_shutdown_and_ready_uds(
     result
 }
 
+/// Renders the main `index.html` template, injecting the current set of
+/// registered [`UiModule`](web_modules::UiModule) entries so the SPA can
+/// build navigation and panel containers at load time.
 fn render_index_html(state: &ApiState) -> Result<String> {
     let mut context = TeraContext::new();
     let modules = state.ui_modules.modules();
@@ -622,12 +737,15 @@ fn render_index_html(state: &ApiState) -> Result<String> {
     Tera::one_off(INDEX_TEMPLATE, &context, false).context("failed rendering index template")
 }
 
+/// Renders the `app.js` template, splicing in the concatenated JavaScript
+/// bundles from all registered UI modules.
 fn render_app_js(state: &ApiState) -> Result<String> {
     let mut context = TeraContext::new();
     context.insert("module_scripts", &state.ui_modules.module_scripts_bundle());
     Tera::one_off(APP_TEMPLATE, &context, false).context("failed rendering app template")
 }
 
+/// Emits a `debug!` trace for every web-UI asset request.
 fn log_web_ui_request(req: &HttpRequest, asset: &str) {
     debug!(
         asset,
@@ -680,6 +798,7 @@ async fn styles_css(req: HttpRequest) -> HttpResponse {
         .body(STYLES_CSS)
 }
 
+/// Builds a cacheable text response with a 24-hour `Cache-Control` header.
 fn static_text_response(content_type: &'static str, body: &'static str) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(content_type)
@@ -687,6 +806,7 @@ fn static_text_response(content_type: &'static str, body: &'static str) -> HttpR
         .body(body)
 }
 
+/// Builds a cacheable binary response with a 24-hour `Cache-Control` header.
 fn static_bytes_response(content_type: &'static str, body: &'static [u8]) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(content_type)
@@ -1038,6 +1158,7 @@ async fn list_plugins(state: web::types::State<ApiState>) -> HttpResponse {
     HttpResponse::Ok().json(&state.plugins.list().await)
 }
 
+/// URL path parameter for single-plugin endpoints (`/plugins/{id}/…`).
 #[derive(Deserialize)]
 struct PluginPath {
     id: String,
@@ -1196,6 +1317,7 @@ async fn invoke_plugin_stream(
     }))
 }
 
+/// URL path parameters for `GET /plugins/{id}/template/{file}`.
 #[derive(Deserialize)]
 struct PluginTemplatePath {
     id: String,
@@ -1254,6 +1376,9 @@ async fn repeater_send(
     }
 }
 
+/// Executes a repeater request: decodes the Base64 blob, sends it upstream,
+/// decompresses the response body when a known `Content-Encoding` is present,
+/// and returns the result with the body re-encoded as Base64.
 async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
     let raw_blob = STANDARD
         .decode(&req.request_blob_base64)
@@ -1313,6 +1438,8 @@ async fn execute_repeater(req: &RepeaterRequest) -> Result<RepeaterResponse> {
     })
 }
 
+/// Extracts the `Content-Encoding` header value, returning `None` when the
+/// header is absent or empty.
 fn content_encoding_from_headers(headers: &http::HeaderMap) -> Option<String> {
     headers
         .get(http::header::CONTENT_ENCODING)
@@ -1321,6 +1448,16 @@ fn content_encoding_from_headers(headers: &http::HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Decodes an HTTP response body according to the supplied
+/// `content_encoding` value.
+///
+/// Supports `gzip`, `deflate` (both zlib-wrapped and raw), `br` (Brotli),
+/// and `zstd`.  Multiple comma-separated encodings are unwound in reverse
+/// order (outermost encoding last in the list).
+///
+/// When `content_encoding` is `None` the function falls back to
+/// [`maybe_decode_http_body_by_magic`] which inspects the first few magic
+/// bytes.
 fn decode_http_body_bytes(body: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>> {
     let Some(content_encoding) = content_encoding else {
         return Ok(match maybe_decode_http_body_by_magic(body)? {
@@ -1385,6 +1522,12 @@ fn decode_http_body_bytes(body: &[u8], content_encoding: Option<&str>) -> Result
     Ok(decoded)
 }
 
+/// Attempts to detect the compression format of `body` by inspecting the
+/// leading magic bytes.
+///
+/// Returns `Ok(Some(decoded))` when gzip (`1f 8b`) or zstd (`28 b5 2f fd`)
+/// magic is detected and decompression succeeds.  Returns `Ok(None)` when no
+/// known magic is found.
 fn maybe_decode_http_body_by_magic(body: &[u8]) -> Result<Option<Vec<u8>>> {
     if body.starts_with(&[0x1f, 0x8b]) {
         let mut decoder = flate2::read::GzDecoder::new(body);
@@ -1462,6 +1605,11 @@ async fn decode_transform(
     }
 }
 
+/// Parses a `"plugin:<name>[:<mode>]"` decoder mode string into a
+/// `(plugin_name, optional_sub_mode)` tuple.
+///
+/// Returns `None` when the string does not start with `"plugin:"` or the
+/// plugin name portion is empty.
 fn parse_plugin_decoder_mode(mode: &str) -> Option<(String, Option<String>)> {
     if !mode.starts_with("plugin:") {
         return None;
@@ -1617,6 +1765,11 @@ async fn ws_stats(state: web::types::State<ApiState>) -> HttpResponse {
     })
 }
 
+/// Parses a [`ContinueRequest`] into an [`InterceptDecision`].
+///
+/// Valid `decision` values: `"forward"`, `"drop"`, `"mutate"`.  When
+/// `"mutate"` is chosen the `mutation.raw_base64` field must be present and
+/// contain valid Base64.
 fn parse_decision(req: &ContinueRequest) -> Result<InterceptDecision> {
     match req.decision.as_str() {
         "forward" => Ok(InterceptDecision::Forward),
@@ -1646,6 +1799,10 @@ fn parse_decision(req: &ContinueRequest) -> Result<InterceptDecision> {
     }
 }
 
+/// Parses a [`ContinueResponseRequest`] into a [`ResponseInterceptDecision`].
+///
+/// Mirrors [`parse_decision`] but operates on response-level intercepts with
+/// individually replaceable status, headers, and body.
 fn parse_response_decision(req: &ContinueResponseRequest) -> Result<ResponseInterceptDecision> {
     match req.decision.as_str() {
         "forward" => Ok(ResponseInterceptDecision::Forward),
@@ -1677,6 +1834,8 @@ fn parse_response_decision(req: &ContinueResponseRequest) -> Result<ResponseInte
     }
 }
 
+/// Increments the port of `addr` by one, returning an error when the port
+/// would overflow `u16::MAX`.
 fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     let port = addr.port();
     if port == u16::MAX {
@@ -1689,6 +1848,7 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     Ok(addr)
 }
 
+/// Removes a pre-existing Unix domain socket file at `path`, if present.
 fn cleanup_uds_socket_path(path: &Path) -> io::Result<()> {
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -1696,6 +1856,9 @@ fn cleanup_uds_socket_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Processes the `state_ops` and `register_ui_modules` arrays from a plugin
+/// invocation result, applying side-effects to [`AppState`] and the
+/// [`UiModuleRegistry`](web_modules::UiModuleRegistry).
 fn apply_plugin_output_ops(
     app_state: &AppState,
     ui_modules: &web_modules::UiModuleRegistry,
@@ -1707,6 +1870,13 @@ fn apply_plugin_output_ops(
     }
 }
 
+/// Applies the `state_ops` array from a plugin output JSON object.
+///
+/// Recognised operations:
+/// - `set_intercept_enabled`
+/// - `set_intercept_response_enabled`
+/// - `set_mitm_enabled`
+/// - `set_scope_hosts`
 fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     let mut applied = 0usize;
     let Some(ops) = output.get("state_ops").and_then(|v| v.as_array()) else {
@@ -1754,6 +1924,8 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     applied
 }
 
+/// Registers UI modules declared in the `register_ui_modules` array of a
+/// plugin output payload.  Existing modules with the same `id` are replaced.
 fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &Value) -> usize {
     let Some(modules) = output.get("register_ui_modules").and_then(Value::as_array) else {
         return 0;
@@ -1799,6 +1971,8 @@ fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &
     registered
 }
 
+/// Builds a JSON error [`HttpResponse`] using the provided response builder
+/// and error message string.
 fn json_error(mut builder: ntex::http::ResponseBuilder, msg: &str) -> HttpResponse {
     builder.json(&ApiErrorBody {
         error: msg.to_string(),

@@ -1,3 +1,23 @@
+//! Encrypted Client Hello (ECH) auto-discovery and retry.
+//!
+//! When ECH is enabled (the default — controlled by `ROXY_ECH_ENABLED`)
+//! the module:
+//!
+//! 1. Resolves **DNS HTTPS** records for the target host.
+//! 2. Extracts and decodes the `ech=` / `echconfig=` parameter.
+//! 3. Applies the resulting config list to the BoringSSL
+//!    [`SslRef`] before the handshake.
+//!
+//! Results are cached per-host with TTLs derived from the DNS record.
+//!
+//! ## Environment variables
+//!
+//! | Variable | Default | Description |
+//! |---|---|---|
+//! | `ROXY_ECH_ENABLED` | `true` | Master enable/disable |
+//! | `ROXY_ECH_GREASE` | `true` | Send GREASE ECH extension when no config is available |
+//! | `ROXY_ECH_CONFIG_LIST_BASE64` | — | Static base64-encoded ECH config list (skips DNS) |
+
 use std::{
     env,
     net::IpAddr,
@@ -18,9 +38,13 @@ use hickory_resolver::{
 use tokio_boring::HandshakeError;
 use tracing::{debug, warn};
 
+/// Information extracted from a failed TLS handshake when the server
+/// offers ECH retry configs.
 #[derive(Clone, Debug)]
 pub struct EchRetry {
+    /// DER-encoded ECH config list sent by the server.
     pub config_list: Vec<u8>,
+    /// Optional public name override for the retry attempt.
     pub public_name_override: Option<String>,
 }
 
@@ -41,6 +65,12 @@ const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MIN_POSITIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_POSITIVE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
+/// Applies ECH configuration to an in-flight TLS handshake.
+///
+/// If `config_override` is `Some` it is used directly; otherwise the
+/// module attempts auto-discovery via DNS HTTPS records. When neither
+/// source provides a config list, GREASE ECH may still be enabled
+/// based on the environment setting.
 pub async fn apply_ech_client_config(ssl: &mut SslRef, host: &str, config_override: Option<&[u8]>) {
     let settings = ech_client_settings();
     if !settings.enabled {
@@ -66,6 +96,12 @@ pub async fn apply_ech_client_config(ssl: &mut SslRef, host: &str, config_overri
     }
 }
 
+/// Inspects a TLS [`HandshakeError`] for ECH retry configs offered
+/// by the server.
+///
+/// Returns `Some(EchRetry)` when the server indicates ECH should be
+/// retried with updated configs, or `None` if the error is unrelated
+/// to ECH.
 pub fn ech_retry_from_handshake_error<S>(err: &HandshakeError<S>) -> Option<EchRetry> {
     let ssl = err.ssl()?;
     let config_list = ssl.get_ech_retry_configs()?.to_vec();

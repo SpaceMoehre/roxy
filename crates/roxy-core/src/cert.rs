@@ -1,6 +1,18 @@
-//! roxy_core `cert` module.
+//! TLS CA certificate generation and per-domain MITM leaf certificates.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! [`CertManager`] is the central entry-point for all certificate operations.
+//! On first start it either loads an existing root CA from disk or generates a
+//! new one.  When the proxy intercepts an HTTPS CONNECT tunnel it calls
+//! [`CertManager::get_or_create_domain_cert`] to obtain a leaf certificate
+//! signed by that root CA, enabling transparent man-in-the-middle inspection.
+//!
+//! Generated CA material is persisted under the configured storage directory as
+//! `ca-cert.pem` and `ca-key.pem` so the user can import the root into their
+//! system trust store once and all future sessions are automatically trusted.
+//!
+//! Domain leaf certificates are cached in a lock-free [`DashMap`] so
+//! concurrent CONNECT tunnels to the same host do not regenerate the
+//! certificate.
 
 use std::{
     fs,
@@ -17,52 +29,71 @@ use rcgen::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `CaCertificate`.
+/// Serialisable snapshot of the root CA certificate material.
 ///
-/// See also: [`CaCertificate`].
+/// Returned by [`CertManager::regenerate_ca`] and used internally to persist
+/// the CA to disk and export it to the API layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaCertificate {
+    /// DER-encoded root certificate bytes.
     pub cert_der: Vec<u8>,
+    /// PEM-encoded root certificate.
     pub cert_pem: String,
+    /// PEM-encoded root CA private key.
     pub key_pem: String,
 }
 
-#[derive(Clone, Debug)]
-/// Represents `DomainCertificate`.
+/// A per-domain leaf certificate signed by the roxy root CA.
 ///
-/// See also: [`DomainCertificate`].
+/// Used by the TLS acceptor in
+/// [`build_downstream_mitm_acceptor`](roxy_tls::server::build_downstream_mitm_acceptor)
+/// to present a trusted certificate to the downstream client during MITM
+/// interception.
+#[derive(Clone, Debug)]
 pub struct DomainCertificate {
+    /// DER-encoded leaf certificate bytes.
     pub cert_der: Vec<u8>,
+    /// DER-encoded leaf private key bytes.
     pub key_der: Vec<u8>,
 }
 
+/// Internal bundle holding the parsed rcgen objects alongside the serialised
+/// public data.
 struct RootCaMaterial {
     cert: Certificate,
     key: KeyPair,
     pub_data: CaCertificate,
 }
 
-#[derive(Clone)]
-/// Represents `CertManager`.
+/// Manages the proxy's root CA and per-domain leaf certificates.
 ///
-/// See also: [`CertManager`].
+/// Cheaply [`Clone`]-able — all interior state is behind `Arc`.
+///
+/// # Thread safety
+///
+/// * The root CA is protected by a [`RwLock`] so it can be regenerated at
+///   runtime without stopping the proxy.
+/// * Domain leaf certificates are cached in a lock-free [`DashMap`].
+#[derive(Clone)]
 pub struct CertManager {
+    /// Filesystem directory where `ca-cert.pem` / `ca-key.pem` are stored.
     storage_dir: PathBuf,
+    /// Current root CA material (read-heavy, write-rare).
     root: Arc<RwLock<RootCaMaterial>>,
+    /// Domain → leaf cert cache.
     domain_cache: Arc<DashMap<String, DomainCertificate>>,
 }
 
 impl CertManager {
-    /// Loads `or create`.
+    /// Loads an existing root CA from `storage_dir`, or generates and persists
+    /// a new one if none exists.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// The directory is created automatically if it does not exist.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error when the storage directory cannot be created, the
+    /// existing PEM files cannot be read/parsed, or key generation fails.
     pub fn load_or_create(storage_dir: impl AsRef<Path>) -> Result<Self> {
         let storage_dir = storage_dir.as_ref().to_path_buf();
         fs::create_dir_all(&storage_dir)
@@ -76,38 +107,23 @@ impl CertManager {
         })
     }
 
-    /// Exports `ca der`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a clone of the DER-encoded root CA certificate.
     pub async fn export_ca_der(&self) -> Vec<u8> {
         self.root.read().await.pub_data.cert_der.clone()
     }
 
-    /// Exports `ca pem`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a clone of the PEM-encoded root CA certificate.
     pub async fn export_ca_pem(&self) -> String {
         self.root.read().await.pub_data.cert_pem.clone()
     }
 
-    /// Executes `regenerate ca`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Generates a brand-new root CA, persists it to disk, and clears the
+    /// domain leaf cache so subsequent CONNECT tunnels receive certificates
+    /// signed by the new CA.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error when key generation or filesystem I/O fails.
     pub async fn regenerate_ca(&self) -> Result<CaCertificate> {
         let root = generate_root_ca()?;
         persist_root_ca(&self.storage_dir, &root.pub_data)?;
@@ -117,16 +133,13 @@ impl CertManager {
         Ok(result)
     }
 
-    /// Gets `or create domain cert`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_core as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a cached leaf certificate for `domain`, generating and caching
+    /// a new one signed by the current root CA if none exists yet.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error when the domain string is invalid for certificate
+    /// generation or when key generation fails.
     pub async fn get_or_create_domain_cert(&self, domain: &str) -> Result<DomainCertificate> {
         if let Some(cert) = self.domain_cache.get(domain) {
             return Ok(cert.clone());
@@ -139,6 +152,8 @@ impl CertManager {
     }
 }
 
+/// Attempts to load the root CA from PEM files on disk; falls back to
+/// generating and persisting a new one.
 fn load_or_create_root_ca(storage_dir: &Path) -> Result<RootCaMaterial> {
     let cert_pem_path = storage_dir.join("ca-cert.pem");
     let key_pem_path = storage_dir.join("ca-key.pem");
@@ -173,6 +188,7 @@ fn load_or_create_root_ca(storage_dir: &Path) -> Result<RootCaMaterial> {
     Ok(root)
 }
 
+/// Writes the root CA PEM files to disk.
 fn persist_root_ca(storage_dir: &Path, ca: &CaCertificate) -> Result<()> {
     let cert_pem_path = storage_dir.join("ca-cert.pem");
     let key_pem_path = storage_dir.join("ca-key.pem");
@@ -183,6 +199,8 @@ fn persist_root_ca(storage_dir: &Path, ca: &CaCertificate) -> Result<()> {
     Ok(())
 }
 
+/// Builds deterministic [`CertificateParams`] for the root CA (fixed DN,
+/// validity window 2024–2040, unconstrained CA basic constraint).
 fn root_params() -> CertificateParams {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::OrganizationName, "Roxy Proxy");
@@ -197,6 +215,7 @@ fn root_params() -> CertificateParams {
     params
 }
 
+/// Generates a fresh root CA key-pair and self-signed certificate.
 fn generate_root_ca() -> Result<RootCaMaterial> {
     let key = KeyPair::generate().context("failed generating CA keypair")?;
     let params = root_params();
@@ -216,6 +235,7 @@ fn generate_root_ca() -> Result<RootCaMaterial> {
     })
 }
 
+/// Generates a leaf certificate for `domain` signed by the given issuer.
 fn generate_leaf_cert(
     domain: &str,
     issuer_cert: &Certificate,

@@ -1,6 +1,26 @@
-//! roxy_core `raw_http` module.
+//! Lossless raw HTTP request blob parsing and building.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! roxy stores every captured request as a complete "wire-format" byte blob
+//! (`request-line ‖ headers ‖ CRLFCRLF ‖ body`).  This module provides
+//! [`build_request_blob`] to assemble such a blob from structured parts and
+//! [`parse_request_blob`] to decompose one back into a [`ParsedRequestBlob`].
+//!
+//! The round-trip is intentionally lossless: building a blob and immediately
+//! parsing it must produce the same structured fields that were fed in. This
+//! guarantees that edits made through the intercept / repeater UI are
+//! accurately reflected upstream.
+//!
+//! # Wire format
+//!
+//! ```text
+//! METHOD SP request-target SP HTTP/1.1 CRLF
+//! header-name: SP header-value CRLF
+//! …
+//! CRLF
+//! [body bytes]
+//! ```
+//!
+//! The parser also tolerates blobs that use bare `\n` instead of `\r\n`.
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -8,24 +28,42 @@ use http::Uri;
 
 use crate::model::HeaderValuePair;
 
-#[derive(Clone, Debug)]
-/// Represents `ParsedRequestBlob`.
+/// Structured representation of a raw HTTP request blob.
 ///
-/// See also: [`ParsedRequestBlob`].
+/// Produced by [`parse_request_blob`]; consumed by the proxy engine and the
+/// outbound HTTP client when forwarding traffic upstream.
+#[derive(Clone, Debug)]
 pub struct ParsedRequestBlob {
+    /// HTTP method (`GET`, `POST`, …).
     pub method: String,
+    /// Fully-qualified URI including scheme and authority
+    /// (e.g. `https://example.com/path`).
     pub uri: String,
+    /// Target hostname (without port) extracted from the URI or `Host` header.
     pub host: String,
+    /// Parsed request headers in original order.
     pub headers: Vec<HeaderValuePair>,
+    /// Body bytes (everything after the blank line separator).
     pub body: Bytes,
 }
 
-/// Builds `request blob`.
+/// Assembles a raw HTTP/1.1 request blob from structured parts.
+///
+/// The resulting [`Bytes`] contain the full wire-format blob:
+/// `METHOD SP target SP HTTP/1.1 CRLF headers CRLF body`.
 ///
 /// # Examples
+///
 /// ```
-/// use roxy_core as _;
-/// assert!(true);
+/// use roxy_core::raw_http::build_request_blob;
+/// use roxy_core::model::HeaderValuePair;
+///
+/// let headers = vec![HeaderValuePair {
+///     name: "Host".into(),
+///     value: "example.com".into(),
+/// }];
+/// let blob = build_request_blob("GET", "/index.html", &headers, b"");
+/// assert!(blob.starts_with(b"GET /index.html HTTP/1.1\r\n"));
 /// ```
 pub fn build_request_blob(
     method: &str,
@@ -58,16 +96,25 @@ pub fn build_request_blob(
     Bytes::from(out)
 }
 
-/// Parses `request blob`.
+/// Parses a raw HTTP request blob into structured fields.
 ///
-/// # Examples
-/// ```
-/// use roxy_core as _;
-/// assert!(true);
-/// ```
+/// The parser handles three URI forms:
+///
+/// 1. **Absolute URI** — `GET http://example.com/path HTTP/1.1` → used as-is.
+/// 2. **Origin-form** — `GET /path HTTP/1.1` + `Host: example.com` → scheme
+///    is taken from `default_scheme`, authority from the `Host` header (or
+///    `authority_hint` if `Host` is absent).
+/// 3. **Bare `\n`** line endings — tolerated in addition to `\r\n`.
 ///
 /// # Errors
-/// Returns an error when the operation cannot be completed.
+///
+/// Returns an error when:
+///
+/// * The blob has no `\r\n\r\n` (or `\n\n`) header/body separator.
+/// * The request head is not valid UTF-8.
+/// * The start line is missing a method or request-target.
+/// * An origin-form request has no `Host` header and no `authority_hint`.
+/// * A header line has no `:` separator.
 pub fn parse_request_blob(
     raw: &[u8],
     default_scheme: &str,
@@ -128,6 +175,7 @@ pub fn parse_request_blob(
     })
 }
 
+/// Parses a single `name: value` header line.
 fn parse_header_line(line: &str) -> Result<HeaderValuePair> {
     let idx = line
         .find(':')
@@ -143,6 +191,7 @@ fn parse_header_line(line: &str) -> Result<HeaderValuePair> {
     })
 }
 
+/// Returns the value of the first header matching `name` (case-insensitive).
 fn header_value<'a>(headers: &'a [HeaderValuePair], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -150,6 +199,7 @@ fn header_value<'a>(headers: &'a [HeaderValuePair], name: &str) -> Option<&'a st
         .map(|h| h.value.as_str())
 }
 
+/// Splits a raw blob at the first `\r\n\r\n` (or `\n\n`) into head and body.
 fn split_request(raw: &[u8]) -> Result<(&[u8], &[u8])> {
     if let Some(index) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
         let head = &raw[..index];

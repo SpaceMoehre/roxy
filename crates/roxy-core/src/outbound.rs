@@ -1,4 +1,22 @@
-//! Shared outbound HTTP(S) client helpers used by API and intruder flows.
+//! Shared outbound HTTP/HTTPS client for the repeater and intruder.
+//!
+//! This module provides [`send_parsed_request`], a high-level function that
+//! takes a [`ParsedRequestBlob`] and sends it upstream over a fresh TCP (or
+//! TLS) connection.  It handles:
+//!
+//! * **Scheme routing** — plain-text for `http://`, BoringSSL TLS for
+//!   `https://`.
+//! * **ALPN negotiation** — transparently upgrades to HTTP/2 when the server
+//!   selects `h2` during the TLS handshake.
+//! * **ECH retry** — if the initial TLS handshake fails with ECH retry
+//!   configs, the function reconnects and retries once with the server's
+//!   suggested config list.
+//! * **Timeout** — the entire round-trip is wrapped in a
+//!   [`tokio::time::timeout`].
+//!
+//! Unlike the proxy engine's private `forward_upstream_request`, this
+//! function does **not** route through upstream proxy chains — it always
+//! connects directly to the target authority.
 
 use std::time::Duration;
 
@@ -24,15 +42,30 @@ use roxy_tls::{
 
 use crate::raw_http::ParsedRequestBlob;
 
+/// The status code, headers, and body of an upstream HTTP response.
 #[derive(Clone, Debug)]
-/// Represents an outbound upstream response.
 pub struct OutboundResponse {
+    /// HTTP status code returned by the upstream server.
     pub status: StatusCode,
+    /// Response headers as received.
     pub headers: HeaderMap,
+    /// Raw response body bytes (not content-decoded).
     pub body: Bytes,
 }
 
-/// Sends a parsed request blob directly to its target URI.
+/// Sends `parsed_request` to its target URI with a wall-clock `timeout`.
+///
+/// When `accept_invalid_certs` is `true` the TLS connector skips certificate
+/// validation — useful for testing against self-signed upstreams.
+///
+/// # Errors
+///
+/// Returns an error when:
+///
+/// * The URI scheme is neither `http` nor `https`.
+/// * The TCP connection or TLS handshake fails (including after an ECH retry).
+/// * The upstream does not respond within `timeout`.
+/// * The response body cannot be fully read.
 pub async fn send_parsed_request(
     parsed_request: ParsedRequestBlob,
     timeout: Duration,
@@ -129,6 +162,8 @@ pub async fn send_parsed_request(
     .with_context(|| format!("outbound request timed out after {timeout:?}"))?
 }
 
+/// Sends an already-built HTTP request over an established stream, choosing
+/// HTTP/1.1 or HTTP/2 based on `use_h2`.
 async fn send_http_request_over_stream<S>(
     stream: S,
     parsed_request: &ParsedRequestBlob,
@@ -239,6 +274,8 @@ where
     })
 }
 
+/// Extracts `host:port` from a URI, defaulting to port 443 for `https` and
+/// 80 for everything else.
 fn uri_authority_with_default_port(uri: &Uri) -> Result<String> {
     let host = uri
         .host()
@@ -250,6 +287,7 @@ fn uri_authority_with_default_port(uri: &Uri) -> Result<String> {
     Ok(format_authority(host, port))
 }
 
+/// Formats a `host:port` pair, wrapping bare IPv6 addresses in brackets.
 fn format_authority(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")

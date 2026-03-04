@@ -1,33 +1,37 @@
-//! roxy_api `web_modules` module.
+//! Dynamic UI module registry.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! Plugins and built-in features contribute dashboard panels to the
+//! web UI by registering [`UiModule`]s with the
+//! [`UiModuleRegistry`].  The registry is read at render time to
+//! produce the navigation, panel HTML, settings dialogs, and a single
+//! concatenated JavaScript bundle.
 
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
+/// A self-contained dashboard panel contributed by a plugin or built-in
+/// feature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `UiModule`.
-///
-/// See also: [`UiModule`].
 pub struct UiModule {
+    /// Unique identifier used as the DOM id and route key.
     pub id: String,
+    /// Human-readable label shown in the navigation sidebar.
     pub title: String,
+    /// When `true` the module is loaded but hidden from the nav bar.
     #[serde(default)]
     pub nav_hidden: bool,
+    /// HTML fragment rendered into the main panel area.
     pub panel_html: String,
+    /// HTML fragment rendered inside the global settings dialog.
     pub settings_html: String,
+    /// JavaScript source evaluated after the DOM is ready.
     pub script_js: String,
 }
 
 impl UiModule {
-    /// Constructs a new instance.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Creates a module from `&'static str` slices (ideal for
+    /// `include_str!` at compile time).
     pub fn new(
         id: &'static str,
         title: &'static str,
@@ -46,36 +50,26 @@ impl UiModule {
     }
 }
 
-#[derive(Debug, Default)]
-/// Represents `UiModuleRegistry`.
+/// Thread-safe registry of [`UiModule`]s.
 ///
-/// See also: [`UiModuleRegistry`].
+/// Internally guarded by an [`RwLock`] so modules can be registered
+/// from any thread.
+#[derive(Debug, Default)]
 pub struct UiModuleRegistry {
     modules: RwLock<Vec<UiModule>>,
 }
 
 impl UiModuleRegistry {
-    /// Constructs a new instance.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Executes `register`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Adds or replaces a module (matched by `id`).
     ///
     /// # Panics
-    /// Panics if internal assertions fail or infallible assumptions are violated.
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     pub fn register(&self, module: UiModule) {
         let mut modules = self
             .modules
@@ -88,16 +82,11 @@ impl UiModuleRegistry {
         modules.push(module);
     }
 
-    /// Executes `modules`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Returns a snapshot of all registered modules.
     ///
     /// # Panics
-    /// Panics if internal assertions fail or infallible assumptions are violated.
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     pub fn modules(&self) -> Vec<UiModule> {
         self.modules
             .read()
@@ -105,16 +94,12 @@ impl UiModuleRegistry {
             .clone()
     }
 
-    /// Executes `module scripts bundle`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Concatenates every module’s `script_js` into a single string
+    /// separated by blank lines.
     ///
     /// # Panics
-    /// Panics if internal assertions fail or infallible assumptions are violated.
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     pub fn module_scripts_bundle(&self) -> String {
         self.modules
             .read()
@@ -125,13 +110,8 @@ impl UiModuleRegistry {
             .join("\n\n")
     }
 
-    /// Executes `with builtin modules`.
-    ///
-    /// # Examples
-    /// ```
-    /// use roxy_api as _;
-    /// assert!(true);
-    /// ```
+    /// Creates a registry pre-populated with the four built-in
+    /// modules: *Intruder*, *Repeater*, *Decoder*, and *Plugins*.
     pub fn with_builtin_modules() -> Self {
         let registry = Self::new();
         registry.register(UiModule::new(

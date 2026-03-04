@@ -1,6 +1,14 @@
-//! roxy_storage `crate root` module.
+//! Persistent exchange storage with full-text search.
 //!
-//! Exposes public types and functions used by the `roxy` runtime and API surface.
+//! Captured HTTP exchanges are persisted in a [sled](https://docs.rs/sled)
+//! embedded key–value store and indexed with
+//! [tantivy](https://docs.rs/tantivy) for sub-millisecond full-text
+//! search across request URIs, hosts, methods, headers, and bodies.
+//!
+//! ## Resilience
+//!
+//! If the tantivy index is found to be corrupt at startup the manager
+//! transparently rebuilds it by replaying every exchange from sled.
 
 use std::{fs, path::Path, sync::Arc};
 
@@ -18,19 +26,19 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{error, warn};
 use uuid::Uuid;
 
+/// A single search result pairing a UUID with the full exchange.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Represents `HistorySearchHit`.
-///
-/// See also: [`HistorySearchHit`].
 pub struct HistorySearchHit {
+    /// Exchange UUID (same as `exchange.request.id`).
     pub id: Uuid,
+    /// The complete captured exchange.
     pub exchange: CapturedExchange,
 }
 
-#[derive(Clone)]
-/// Represents `StorageManager`.
+/// Cheaply cloneable handle to the storage subsystem.
 ///
-/// See also: [`StorageManager`].
+/// Wraps a sled database and a tantivy index behind an [`Arc`].
+#[derive(Clone)]
 pub struct StorageManager {
     inner: Arc<StorageInner>,
 }
@@ -54,16 +62,16 @@ struct SearchFields {
 }
 
 impl StorageManager {
-    /// Opens ``.
+    /// Opens (or creates) the storage directory at `base_dir`.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// Two sub-directories are created: `sled/` for the KV store and
+    /// `tantivy/` for the full-text index. If the tantivy index cannot
+    /// be opened it is rebuilt from the sled contents.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the directory cannot be created or the
+    /// underlying databases fail to initialise.
     pub fn open(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         std::fs::create_dir_all(base_dir)
@@ -99,13 +107,10 @@ impl StorageManager {
         })
     }
 
-    /// Executes `spawn ingestor`.
+    /// Spawns a Tokio task that reads [`CapturedExchange`]s from the
+    /// channel and persists each one.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// Returns the task handle so the caller can await clean shutdown.
     pub fn spawn_ingestor(
         &self,
         mut rx: mpsc::Receiver<CapturedExchange>,
@@ -120,16 +125,16 @@ impl StorageManager {
         })
     }
 
-    /// Persists `exchange`.
+    /// Writes an exchange to sled and adds it to the tantivy index.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// Both the full raw request blob and a reconstructed response
+    /// blob are indexed so that header values and body text are
+    /// searchable.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if serialisation, sled insertion, or tantivy
+    /// commit fails.
     pub async fn persist_exchange(&self, exchange: &CapturedExchange) -> Result<()> {
         let id = exchange.request.id;
         let key = id.as_bytes();
@@ -164,16 +169,13 @@ impl StorageManager {
         Ok(())
     }
 
-    /// Gets `exchange`.
+    /// Retrieves a single exchange by UUID from sled.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// Returns `Ok(None)` if the key does not exist.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error on I/O or deserialisation failure.
     pub fn get_exchange(&self, id: Uuid) -> Result<Option<CapturedExchange>> {
         let value = self
             .inner
@@ -189,16 +191,16 @@ impl StorageManager {
             .transpose()
     }
 
-    /// Executes `search`.
+    /// Full-text searches all indexed fields and returns up to
+    /// `limit` matching exchanges.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// An empty or whitespace-only query returns an empty vec. If the
+    /// query contains tantivy special characters (`:`, `+`, `*`, …)
+    /// a fallback literal phrase search is attempted automatically.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error if the tantivy reader or searcher fails.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistorySearchHit>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
@@ -262,16 +264,15 @@ impl StorageManager {
         Ok(hits)
     }
 
-    /// Lists `recent`.
+    /// Returns the `limit` most recently created exchanges, newest
+    /// first.
     ///
-    /// # Examples
-    /// ```
-    /// use roxy_storage as _;
-    /// assert!(true);
-    /// ```
+    /// This scans the full sled database and sorts in memory, so it
+    /// is best used for small result sets.
     ///
     /// # Errors
-    /// Returns an error when the operation cannot be completed.
+    ///
+    /// Returns an error on I/O or deserialisation failure.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<HistorySearchHit>> {
         let mut rows = Vec::new();
         for row in self.inner.db.iter() {
