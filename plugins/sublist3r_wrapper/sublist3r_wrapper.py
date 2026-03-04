@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import json
 import re
+import socket
 import ssl
 import subprocess
 import time
@@ -156,18 +157,48 @@ def _build_opener_with_proxy():
     return None
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Best-effort timeout detection for urllib/socket wrapped exceptions."""
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
+
+
+def _fetch_response_bytes(req: Request, timeout: float) -> bytes:
+    """Fetch URL bytes, retrying direct if a proxied request times out."""
+    opener = _build_opener_with_proxy()
+    if opener:
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as proxy_exc:
+            # Common failure mode: plugin requests routed through Roxy while
+            # interception is enabled can stall; retry directly once.
+            if _is_timeout_error(proxy_exc):
+                try:
+                    with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
+                        return resp.read()
+                except Exception as direct_exc:
+                    raise RuntimeError(
+                        f"proxy request timed out; direct retry failed: {direct_exc}"
+                    ) from direct_exc
+            raise
+
+    with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
+        return resp.read()
+
+
 def _http_get_json(url: str, timeout: float = 15.0) -> Any:
     """Perform a simple HTTPS GET and parse JSON."""
     req = Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Roxy Proxy Plugin)",
         "Accept": "application/json",
     })
-    opener = _build_opener_with_proxy()
-    if opener:
-        with opener.open(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace"))
-    with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    return json.loads(_fetch_response_bytes(req, timeout).decode("utf-8", "replace"))
 
 
 def _http_get_text(url: str, timeout: float = 15.0) -> str:
@@ -176,23 +207,15 @@ def _http_get_text(url: str, timeout: float = 15.0) -> str:
         "User-Agent": "Mozilla/5.0 (Roxy Proxy Plugin)",
         "Accept": "text/html,application/json",
     })
-    opener = _build_opener_with_proxy()
-    if opener:
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
-    with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
-        return resp.read().decode("utf-8", "replace")
+    return _fetch_response_bytes(req, timeout).decode("utf-8", "replace")
 
 
 def _source_sublist3r_api(domain: str) -> List[str]:
     """Query the Sublist3r PassiveDNS API."""
     url = f"https://api.sublist3r.com/search.php?domain={domain}"
-    try:
-        data = _http_get_json(url, timeout=20.0)
-        if isinstance(data, list):
-            return [str(s).strip().lower() for s in data if s]
-    except Exception:
-        pass
+    data = _http_get_json(url, timeout=20.0)
+    if isinstance(data, list):
+        return [str(s).strip().lower() for s in data if s]
     return []
 
 
@@ -200,18 +223,15 @@ def _source_crtsh(domain: str) -> List[str]:
     """Query crt.sh Certificate Transparency logs."""
     url = f"https://crt.sh/?q=%25.{domain}&output=json"
     subdomains: set[str] = set()
-    try:
-        data = _http_get_json(url, timeout=20.0)
-        if isinstance(data, list):
-            for entry in data:
-                name = entry.get("name_value", "")
-                for line in name.split("\n"):
-                    sub = line.strip().lower()
-                    if sub.endswith(f".{domain}") or sub == domain:
-                        if "*" not in sub and "@" not in sub:
-                            subdomains.add(sub)
-    except Exception:
-        pass
+    data = _http_get_json(url, timeout=20.0)
+    if isinstance(data, list):
+        for entry in data:
+            name = entry.get("name_value", "")
+            for line in name.split("\n"):
+                sub = line.strip().lower()
+                if sub.endswith(f".{domain}") or sub == domain:
+                    if "*" not in sub and "@" not in sub:
+                        subdomains.add(sub)
     return list(subdomains)
 
 
@@ -291,6 +311,23 @@ def _extract_domain_from_url(url: str) -> str:
     return d.rstrip("/").split("/")[0].split(":")[0]
 
 
+def _setting_bool(settings: Dict[str, Any], key: str, default: bool) -> bool:
+    value = settings.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Main enumeration logic
 # ---------------------------------------------------------------------------
@@ -298,15 +335,15 @@ def _extract_domain_from_url(url: str) -> str:
 def enumerate_subdomains(domain: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Run subdomain enumeration and return structured results."""
     domain = _clean_domain(domain)
-    use_sublist3r_api = settings.get("use_sublist3r_api", True)
-    use_crtsh = settings.get("use_crtsh", True)
-    use_full_tool = settings.get("use_full_sublist3r", False)
-    bruteforce = settings.get("bruteforce", False)
+    use_sublist3r_api = _setting_bool(settings, "use_sublist3r_api", True)
+    use_crtsh = _setting_bool(settings, "use_crtsh", True)
+    use_full_tool = _setting_bool(settings, "use_full_sublist3r", False)
+    bruteforce = _setting_bool(settings, "bruteforce", False)
     threads = int(settings.get("threads", 30))
     engines = settings.get("engines") or None
 
     # Configure proxy if the user opted in (default: enabled).
-    if settings.get("proxy_through_roxy", True):
+    if _setting_bool(settings, "proxy_through_roxy", True):
         proxy_port = int(settings.get("roxy_proxy_port", 8080))
         _set_proxy(f"http://127.0.0.1:{proxy_port}")
     else:
@@ -330,6 +367,8 @@ def enumerate_subdomains(domain: str, settings: Dict[str, Any]) -> Dict[str, Any
         except Exception as exc:
             errors.append(f"sublist3r-api: {exc}")
             _progress(f"Sublist3r API error: {exc}", error=True)
+    else:
+        _progress("Skipping Sublist3r API (disabled)")
 
     # Source 2: crt.sh
     if use_crtsh:
@@ -342,6 +381,8 @@ def enumerate_subdomains(domain: str, settings: Dict[str, Any]) -> Dict[str, Any
         except Exception as exc:
             errors.append(f"crt.sh: {exc}")
             _progress(f"crt.sh error: {exc}", error=True)
+    else:
+        _progress("Skipping crt.sh (disabled)")
 
     # Source 3: Full Sublist3r tool
     if use_full_tool:
@@ -401,6 +442,11 @@ def handle(hook: str, payload: dict) -> dict:
 
     if hook == "enumerate":
         domain = payload.get("domain", "")
+        # Runtime settings coming from the Sublist3r panel take precedence
+        # over persisted plugin settings for this invocation.
+        runtime_settings = payload.get("settings")
+        if isinstance(runtime_settings, dict):
+            settings = {**settings, **runtime_settings}
         # Accept a full URL and extract the domain from it.
         if not domain:
             url = payload.get("url", "")

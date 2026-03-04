@@ -93,6 +93,56 @@ body {
   background: #6286c7;
 }
 
+.startup-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  background:
+    radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent-soft) 62%, transparent), transparent 70%),
+    linear-gradient(140deg, color-mix(in srgb, var(--bg) 88%, #000 12%), color-mix(in srgb, var(--bg-2) 88%, #000 12%));
+}
+
+.startup-loader-core {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  display: grid;
+  place-items: center;
+}
+
+.startup-loader-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+  border-top-color: var(--accent);
+  border-right-color: color-mix(in srgb, var(--accent) 72%, transparent);
+  animation: roxy-loader-spin 1s linear infinite;
+}
+
+.startup-loader-logo {
+  width: 46px;
+  height: 46px;
+  filter: drop-shadow(0 6px 10px rgba(20, 32, 51, 0.24));
+}
+
+.startup-loader-status {
+  font-size: 12px;
+  font-weight: 620;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+@keyframes roxy-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell {
   height: 100%;
   display: grid;
@@ -140,47 +190,6 @@ body {
   color: #fff;
   border-color: transparent;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-}
-
-.tab.plugins-open {
-  color: #fff;
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-}
-
-.plugins-tab-menu {
-  position: absolute;
-  z-index: 10;
-  min-width: 240px;
-  max-width: min(380px, 92vw);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
-  box-shadow: var(--shadow);
-  padding: 7px;
-}
-
-.plugins-tab-menu-title {
-  font-size: 11px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin: 0 0 6px;
-}
-
-.plugins-tab-menu-items {
-  display: grid;
-  gap: 4px;
-  max-height: min(42vh, 360px);
-  overflow: auto;
-}
-
-.plugins-tab-menu-item {
-  width: 100%;
-  height: 30px;
-  justify-content: flex-start;
-  text-align: left;
-  border-radius: 7px;
 }
 
 .context-menu {

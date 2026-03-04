@@ -19,6 +19,13 @@
   <body>
     <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
     <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
+    <div id="startup-loader" class="startup-loader" role="status" aria-live="polite" aria-busy="true">
+      <div class="startup-loader-core">
+        <span class="startup-loader-ring" aria-hidden="true"></span>
+        <img class="startup-loader-logo" src="/favicon.svg" alt="Roxy" />
+      </div>
+      <div id="startup-loader-status" class="startup-loader-status">Loading workspace...</div>
+    </div>
     <div class="app-shell">
       <header class="chrome" aria-label="Workspace controls">
         <nav class="tabbar" aria-label="Main sections">
@@ -31,10 +38,6 @@
           {% endfor %}
           <button class="tab" data-tab="settings">Settings</button>
         </nav>
-        <div id="plugins-tab-menu" class="plugins-tab-menu" hidden>
-          <div class="plugins-tab-menu-title">Select Plugin</div>
-          <div id="plugins-tab-menu-items" class="plugins-tab-menu-items"></div>
-        </div>
         <div class="chrome-tools">
           <div class="health-wrap">
             <span class="health-dot" id="health-dot" aria-hidden="true"></span>

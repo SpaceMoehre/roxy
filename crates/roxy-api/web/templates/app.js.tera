@@ -1267,23 +1267,37 @@ function applyThemePreference() {
   }
 }
 
+function setStartupLoading(loading, message = '') {
+  const overlay = qs('startup-loader');
+  if (!overlay) {
+    return;
+  }
+  if (loading) {
+    overlay.hidden = false;
+    overlay.setAttribute('aria-busy', 'true');
+    if (message) {
+      const status = qs('startup-loader-status');
+      if (status) {
+        status.textContent = message;
+      }
+    }
+    return;
+  }
+  overlay.setAttribute('aria-busy', 'false');
+  overlay.hidden = true;
+}
+
 function renderTabs() {
   const tabs = Array.from(document.querySelectorAll('.tab'));
   for (const tab of tabs) {
-    tab.addEventListener('click', async () => {
+    tab.addEventListener('click', () => {
       const tabName = tab.dataset.tab;
-      if (tabName === 'plugins') {
-        await togglePluginsTopMenu();
-        return;
-      }
-      closePluginsTopMenu();
       activateTab(tabName);
     });
   }
 }
 
 function activateTab(tabName) {
-  closePluginsTopMenu();
   closeRequestContextMenu();
   closeProxyHistoryFilterPanel();
   const tabs = Array.from(document.querySelectorAll('.tab'));
@@ -1298,10 +1312,6 @@ function activateTab(tabName) {
   syncResizableSplits();
 }
 
-function pluginTabButton() {
-  return document.querySelector('.tab[data-tab="plugins"]');
-}
-
 function selectedPluginFromStorage() {
   return localStorage.getItem(PLUGIN_SELECTION_STORAGE_KEY) || '';
 }
@@ -1314,103 +1324,6 @@ function setSelectedPlugin(pluginName) {
   }
   localStorage.setItem(PLUGIN_SELECTION_STORAGE_KEY, pluginName);
   window.__roxySelectedPlugin = pluginName;
-}
-
-function closePluginsTopMenu() {
-  const menu = qs('plugins-tab-menu');
-  if (!menu) {
-    return;
-  }
-  menu.hidden = true;
-  pluginTabButton()?.classList.remove('plugins-open');
-}
-
-function positionPluginsTopMenu() {
-  const menu = qs('plugins-tab-menu');
-  const anchor = pluginTabButton();
-  const chrome = document.querySelector('.chrome');
-  if (!menu || !anchor || !chrome) {
-    return;
-  }
-
-  const chromeRect = chrome.getBoundingClientRect();
-  const anchorRect = anchor.getBoundingClientRect();
-  const top = anchorRect.bottom - chromeRect.top + 6;
-  let left = anchorRect.left - chromeRect.left;
-  const menuWidth = Math.max(240, Math.min(380, chromeRect.width - 16));
-  if (left + menuWidth > chromeRect.width - 8) {
-    left = chromeRect.width - menuWidth - 8;
-  }
-  menu.style.top = `${Math.max(6, top)}px`;
-  menu.style.left = `${Math.max(8, left)}px`;
-}
-
-async function renderPluginsTopMenuItems() {
-  const container = qs('plugins-tab-menu-items');
-  if (!container) {
-    return false;
-  }
-
-  let plugins = [];
-  try {
-    plugins = await api('/plugins');
-  } catch {
-    return false;
-  }
-
-  container.innerHTML = '';
-  if (!Array.isArray(plugins) || plugins.length === 0) {
-    return false;
-  }
-
-  for (const plugin of plugins) {
-    const name = plugin.name;
-    if (!name) {
-      continue;
-    }
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'plugins-tab-menu-item';
-    button.textContent = name;
-    button.addEventListener('click', () => {
-      setSelectedPlugin(name);
-      closePluginsTopMenu();
-      activateTab('plugins');
-      const select = qs('plugins-select');
-      if (select) {
-        select.value = name;
-        select.dispatchEvent(new Event('change'));
-      }
-    });
-    container.appendChild(button);
-  }
-
-  return container.children.length > 0;
-}
-
-async function togglePluginsTopMenu() {
-  const menu = qs('plugins-tab-menu');
-  const anchor = pluginTabButton();
-  if (!menu || !anchor) {
-    activateTab('plugins');
-    return;
-  }
-
-  if (!menu.hidden) {
-    closePluginsTopMenu();
-    return;
-  }
-
-  const hasItems = await renderPluginsTopMenuItems();
-  if (!hasItems) {
-    closePluginsTopMenu();
-    activateTab('plugins');
-    return;
-  }
-
-  menu.hidden = false;
-  anchor.classList.add('plugins-open');
-  positionPluginsTopMenu();
 }
 
 function renderProxySubtabs() {
@@ -2889,24 +2802,10 @@ function bindEvents() {
     if (requestMenu && !requestMenu.hidden && !requestMenu.contains(target)) {
       closeRequestContextMenu();
     }
-
-    const menu = qs('plugins-tab-menu');
-    const anchor = pluginTabButton();
-    if (!menu || menu.hidden) {
-      return;
-    }
-    if (menu.contains(target) || (anchor && anchor.contains(target))) {
-      return;
-    }
-    closePluginsTopMenu();
   });
 
   window.addEventListener('resize', () => {
     closeRequestContextMenu();
-    const menu = qs('plugins-tab-menu');
-    if (menu && !menu.hidden) {
-      positionPluginsTopMenu();
-    }
     syncResizableSplits();
   });
 
@@ -2917,7 +2816,6 @@ function bindEvents() {
         return;
       }
       closeRequestContextMenu();
-      closePluginsTopMenu();
     }
   });
 
@@ -2930,6 +2828,7 @@ function bindEvents() {
 }
 
 async function init() {
+  setStartupLoading(true, 'Loading workspace...');
   renderTabs();
   renderProxySubtabs();
   initSettingsAccordion();
@@ -2956,11 +2855,13 @@ async function init() {
   await initializeModules();
 
   connectRealtimeStream();
+  setStartupLoading(false);
 }
 
 {{ module_scripts | safe }}
 
 init().catch((err) => {
+  setStartupLoading(false);
   setHealth(false, 'Initialization failed');
   toast(`Init error: ${err.message}`);
 });

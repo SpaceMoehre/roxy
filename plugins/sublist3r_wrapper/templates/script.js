@@ -127,6 +127,17 @@
     return d;
   }
 
+  function currentRunSettings(container) {
+    return {
+      use_sublist3r_api: qs(container, "sublist3r-opt-api")?.checked !== false,
+      use_crtsh: qs(container, "sublist3r-opt-crtsh")?.checked !== false,
+      use_full_sublist3r: !!qs(container, "sublist3r-opt-full")?.checked,
+      bruteforce: !!qs(container, "sublist3r-opt-brute")?.checked,
+      proxy_through_roxy: qs(container, "sublist3r-opt-proxy")?.checked !== false,
+      roxy_proxy_port: parseInt(qs(container, "sublist3r-opt-proxy-port")?.value || "8080", 10) || 8080,
+    };
+  }
+
   // ---- Jobs tracking ----
 
   function runningCount() {
@@ -241,7 +252,11 @@
           method: "POST",
           body: JSON.stringify({
             hook: "enumerate",
-            payload: { domain, url: raw },
+            payload: {
+              domain,
+              url: raw,
+              settings: currentRunSettings(container),
+            },
           }),
         }
       );
@@ -393,12 +408,7 @@
     readSettings(container, currentSettings) {
       return {
         ...(currentSettings || {}),
-        use_sublist3r_api: qs(container, "sublist3r-opt-api")?.checked !== false,
-        use_crtsh: qs(container, "sublist3r-opt-crtsh")?.checked !== false,
-        use_full_sublist3r: !!qs(container, "sublist3r-opt-full")?.checked,
-        bruteforce: !!qs(container, "sublist3r-opt-brute")?.checked,
-        proxy_through_roxy: qs(container, "sublist3r-opt-proxy")?.checked !== false,
-        roxy_proxy_port: parseInt(qs(container, "sublist3r-opt-proxy-port")?.value || "8080", 10) || 8080,
+        ...currentRunSettings(container),
       };
     },
 
