@@ -23,8 +23,8 @@ use std::{
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-    date_time_ymd,
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, date_time_ymd,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -159,7 +159,7 @@ fn load_or_create_root_ca(storage_dir: &Path) -> Result<RootCaMaterial> {
     let key_pem_path = storage_dir.join("ca-key.pem");
 
     if cert_pem_path.exists() && key_pem_path.exists() {
-        let cert_pem = fs::read_to_string(&cert_pem_path)
+        let _old_cert_pem = fs::read_to_string(&cert_pem_path)
             .with_context(|| format!("failed reading {:?}", cert_pem_path))?;
         let key_pem = fs::read_to_string(&key_pem_path)
             .with_context(|| format!("failed reading {:?}", key_pem_path))?;
@@ -170,16 +170,21 @@ fn load_or_create_root_ca(storage_dir: &Path) -> Result<RootCaMaterial> {
             .self_signed(&key)
             .context("failed rebuilding deterministic root cert")?;
         let cert_der = cert.der().to_vec();
+        // Always derive PEM from the rebuilt cert so on-disk files stay in
+        // sync with any parameter changes (e.g. added key_usages).
+        let cert_pem = cert.pem();
 
         let root = RootCaMaterial {
             cert,
             key,
             pub_data: CaCertificate {
                 cert_der,
-                cert_pem,
-                key_pem,
+                cert_pem: cert_pem.clone(),
+                key_pem: key_pem.clone(),
             },
         };
+        // Re-persist so the PEM on disk matches the current root_params().
+        persist_root_ca(storage_dir, &root.pub_data)?;
         return Ok(root);
     }
 
@@ -212,6 +217,10 @@ fn root_params() -> CertificateParams {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.not_before = date_time_ymd(2024, 1, 1);
     params.not_after = date_time_ymd(2040, 1, 1);
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
     params
 }
 
@@ -246,6 +255,12 @@ fn generate_leaf_cert(
     params
         .distinguished_name
         .push(DnType::CommonName, domain.to_string());
+    params.use_authority_key_identifier_extension = true;
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
     let leaf_key = KeyPair::generate().context("failed generating leaf keypair")?;
     let cert = params

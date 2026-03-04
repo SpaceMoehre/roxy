@@ -115,6 +115,17 @@
           Only URLs
         </label>
       </div>
+
+      <hr style="border:none;border-top:1px solid var(--color-border,#333);margin:.5rem 0;" />
+      <div style="font-weight:600;font-size:.85rem;margin-bottom:.25rem;">Proxy</div>
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+        <input type="checkbox" class="photon-opt-proxy" checked />
+        Route requests through Roxy proxy
+      </label>
+      <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;max-width:12rem;">
+        Roxy proxy port
+        <input type="number" class="photon-opt-proxy-port" value="8080" min="1" max="65535" />
+      </label>
     </div>
   </details>
 </section>

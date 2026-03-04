@@ -275,6 +275,8 @@ struct RegisterUiModuleRequest {
     id: String,
     title: String,
     nav_hidden: Option<bool>,
+    accepts_request: Option<bool>,
+    plugin_name: Option<String>,
     panel_html: String,
     settings_html: String,
     script_js: String,
@@ -1143,6 +1145,8 @@ async fn register_ui_module(
         id: req.id.trim().to_string(),
         title: req.title.trim().to_string(),
         nav_hidden: req.nav_hidden.unwrap_or(false),
+        accepts_request: req.accepts_request.unwrap_or(false),
+        plugin_name: req.plugin_name.clone(),
         panel_html: req.panel_html.clone(),
         settings_html: req.settings_html.clone(),
         script_js: req.script_js.clone(),
@@ -1187,6 +1191,7 @@ async fn register_plugin(
                             &state.app_state,
                             &state.ui_modules,
                             &result.output,
+                            Some(&req.name),
                         );
                     }
                     Err(err) => {
@@ -1286,7 +1291,7 @@ async fn invoke_plugin(
     {
         Ok(result) => {
             let applied =
-                apply_plugin_output_ops(&state.app_state, &state.ui_modules, &result.output);
+                apply_plugin_output_ops(&state.app_state, &state.ui_modules, &result.output, Some(&path.id));
             HttpResponse::Ok().json(&serde_json::json!({
                 "plugin_result": result,
                 "state_ops_applied": applied.state_ops_applied,
@@ -1340,7 +1345,7 @@ async fn invoke_plugin_stream(
         // Process the final result.
         let outcome = match result_rx.await {
             Ok(Ok(result)) => {
-                let applied = apply_plugin_output_ops(&app_state, &ui_modules, &result.output);
+                let applied = apply_plugin_output_ops(&app_state, &ui_modules, &result.output, Some(&plugin_name_bg));
                 serde_json::json!({
                     "plugin_result": result,
                     "state_ops_applied": applied.state_ops_applied,
@@ -1636,6 +1641,7 @@ async fn decode_transform(
                         &state.app_state,
                         &state.ui_modules,
                         &response.output,
+                        Some(&plugin),
                     );
                     let result = response
                         .output
@@ -1914,10 +1920,11 @@ fn apply_plugin_output_ops(
     app_state: &AppState,
     ui_modules: &web_modules::UiModuleRegistry,
     output: &Value,
+    plugin_name: Option<&str>,
 ) -> PluginOpsApplied {
     PluginOpsApplied {
         state_ops_applied: apply_plugin_state_ops(app_state, output),
-        ui_modules_registered: apply_plugin_ui_modules(ui_modules, output),
+        ui_modules_registered: apply_plugin_ui_modules(ui_modules, output, plugin_name),
     }
 }
 
@@ -1977,7 +1984,11 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
 
 /// Registers UI modules declared in the `register_ui_modules` array of a
 /// plugin output payload.  Existing modules with the same `id` are replaced.
-fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &Value) -> usize {
+fn apply_plugin_ui_modules(
+    ui_modules: &web_modules::UiModuleRegistry,
+    output: &Value,
+    plugin_name: Option<&str>,
+) -> usize {
     let Some(modules) = output.get("register_ui_modules").and_then(Value::as_array) else {
         return 0;
     };
@@ -2013,6 +2024,11 @@ fn apply_plugin_ui_modules(ui_modules: &web_modules::UiModuleRegistry, output: &
                 .get("nav_hidden")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            accepts_request: module
+                .get("accepts_request")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            plugin_name: plugin_name.map(str::to_string),
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),
@@ -2095,7 +2111,7 @@ mod tests {
             ]
         });
 
-        let applied = apply_plugin_output_ops(&app_state, &modules, &output);
+        let applied = apply_plugin_output_ops(&app_state, &modules, &output, None);
         assert_eq!(applied.state_ops_applied, 1);
         assert_eq!(applied.ui_modules_registered, 1);
         assert!(!app_state.mitm_enabled());

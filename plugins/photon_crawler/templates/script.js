@@ -331,6 +331,8 @@
       dns: checked("photon-opt-dns"),
       ninja: checked("photon-opt-ninja"),
       only_urls: checked("photon-opt-onlyurls"),
+      proxy_through_roxy: checked("photon-opt-proxy"),
+      roxy_proxy_port: parseInt(val("photon-opt-proxy-port", "8080"), 10) || 8080,
     };
   }
 
@@ -396,6 +398,35 @@
       if (_container && _ctx) doCrawl(_container, _ctx, url);
     },
 
+    /**
+     * Called when a request is sent to this plugin via the right-click
+     * context menu "Send to <plugin>" action.  Builds the full URL from
+     * the request and fills the target URL input field.
+     */
+    onRequestReceived(container, request, _ctx) {
+      const host = request?.host || "";
+      const uri = request?.uri || "/";
+      // uri may already be an absolute URL (e.g. from proxy traffic);
+      // only prepend scheme://host when it's a relative path.
+      let url;
+      if (/^https?:\/\//i.test(uri)) {
+        url = uri;
+      } else {
+        const scheme = (request?.uri || "").startsWith("https") ? "https" : "http";
+        url = host ? `${scheme}://${host}${uri.startsWith("/") ? uri : "/" + uri}` : uri;
+      }
+      const input = qs(container, "photon-url");
+      if (input && url) {
+        // Photon wants just the origin — strip path/query for the target field.
+        try {
+          const parsed = new URL(url);
+          input.value = parsed.origin;
+        } catch (_) {
+          input.value = url;
+        }
+      }
+    },
+
     init(container, settings, ctx) {
       _container = container;
       _ctx = ctx;
@@ -425,6 +456,11 @@
       setChecked("photon-opt-dns", "dns");
       setChecked("photon-opt-ninja", "ninja");
       setChecked("photon-opt-onlyurls", "only_urls");
+
+      // Proxy settings (default: enabled on port 8080).
+      const proxyEl = qs(container, "photon-opt-proxy");
+      if (proxyEl) proxyEl.checked = settings.proxy_through_roxy !== false;
+      setVal("photon-opt-proxy-port", "roxy_proxy_port", "8080");
 
       // Crawl button.
       const crawlBtn = qs(container, "photon-crawl-btn");
@@ -537,6 +573,8 @@
         dns: checked("photon-opt-dns"),
         ninja: checked("photon-opt-ninja"),
         only_urls: checked("photon-opt-onlyurls"),
+        proxy_through_roxy: checked("photon-opt-proxy"),
+        roxy_proxy_port: parseInt(val("photon-opt-proxy-port", "8080"), 10) || 8080,
       };
     },
 

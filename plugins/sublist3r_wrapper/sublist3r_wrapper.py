@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, ProxyHandler
 import sys
 
 
@@ -123,6 +123,7 @@ def _clean_domain(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 _SSL_CTX: ssl.SSLContext | None = None
+_PROXY_URL: str | None = None
 
 
 def _get_ssl_ctx() -> ssl.SSLContext:
@@ -134,12 +135,31 @@ def _get_ssl_ctx() -> ssl.SSLContext:
     return _SSL_CTX
 
 
+def _set_proxy(proxy_url: str | None) -> None:
+    """Configure the module-level proxy URL for HTTP helpers."""
+    global _PROXY_URL
+    _PROXY_URL = proxy_url
+
+
+def _build_opener_with_proxy():
+    """Build a urllib opener that routes through the configured proxy."""
+    if _PROXY_URL:
+        return build_opener(
+            ProxyHandler({"http": _PROXY_URL, "https": _PROXY_URL})
+        )
+    return None
+
+
 def _http_get_json(url: str, timeout: float = 15.0) -> Any:
     """Perform a simple HTTPS GET and parse JSON."""
     req = Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Roxy Proxy Plugin)",
         "Accept": "application/json",
     })
+    opener = _build_opener_with_proxy()
+    if opener:
+        with opener.open(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
     with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
@@ -150,6 +170,10 @@ def _http_get_text(url: str, timeout: float = 15.0) -> str:
         "User-Agent": "Mozilla/5.0 (Roxy Proxy Plugin)",
         "Accept": "text/html,application/json",
     })
+    opener = _build_opener_with_proxy()
+    if opener:
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
     with urlopen(req, timeout=timeout, context=_get_ssl_ctx()) as resp:
         return resp.read().decode("utf-8", "replace")
 
@@ -275,6 +299,13 @@ def enumerate_subdomains(domain: str, settings: Dict[str, Any]) -> Dict[str, Any
     threads = int(settings.get("threads", 30))
     engines = settings.get("engines") or None
 
+    # Configure proxy if the user opted in (default: enabled).
+    if settings.get("proxy_through_roxy", True):
+        proxy_port = int(settings.get("roxy_proxy_port", 8080))
+        _set_proxy(f"http://127.0.0.1:{proxy_port}")
+    else:
+        _set_proxy(None)
+
     all_subs: set[str] = set()
     sources_used: List[str] = []
     errors: List[str] = []
@@ -354,6 +385,7 @@ def handle(hook: str, payload: dict) -> dict:
                 id="sublist3r",
                 title="Sublist3r",
                 nav_hidden=True,
+                accepts_request=True,
                 panel_html=PANEL_HTML,
                 settings_html=SETTINGS_HTML,
                 script_js=SCRIPT_JS,

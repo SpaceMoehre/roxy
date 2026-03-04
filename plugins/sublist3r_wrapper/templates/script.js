@@ -276,6 +276,22 @@
       if (_container && _ctx) doEnumerate(_container, _ctx, url);
     },
 
+    /**
+     * Called when a request is sent to this plugin via the right-click
+     * context menu "Send to <plugin>" action.  Extracts the host from
+     * the request and fills the domain input field.
+     */
+    onRequestReceived(container, request, ctx) {
+      const host = request?.host || "";
+      const domain = host.replace(/:\d+$/, "");
+      if (domain) {
+        const input = qs(container, "sublist3r-domain");
+        if (input) {
+          input.value = domain;
+        }
+      }
+    },
+
     init(container, settings, ctx) {
       _container = container;
       _ctx = ctx;
@@ -289,6 +305,12 @@
       if (optCrt) optCrt.checked = settings.use_crtsh !== false;
       if (optFull) optFull.checked = !!settings.use_full_sublist3r;
       if (optBrute) optBrute.checked = !!settings.bruteforce;
+
+      // Proxy options.
+      const optProxy = qs(container, "sublist3r-opt-proxy");
+      const optProxyPort = qs(container, "sublist3r-opt-proxy-port");
+      if (optProxy) optProxy.checked = settings.proxy_through_roxy !== false;
+      if (optProxyPort) optProxyPort.value = String(settings.roxy_proxy_port || 8080);
 
       // Enumerate button.
       const enumBtn = qs(container, "sublist3r-enumerate-btn");
@@ -375,6 +397,8 @@
         use_crtsh: qs(container, "sublist3r-opt-crtsh")?.checked !== false,
         use_full_sublist3r: !!qs(container, "sublist3r-opt-full")?.checked,
         bruteforce: !!qs(container, "sublist3r-opt-brute")?.checked,
+        proxy_through_roxy: qs(container, "sublist3r-opt-proxy")?.checked !== false,
+        roxy_proxy_port: parseInt(qs(container, "sublist3r-opt-proxy-port")?.value || "8080", 10) || 8080,
       };
     },
 

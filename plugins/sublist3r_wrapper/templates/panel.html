@@ -71,3 +71,19 @@
     </label>
   </div>
 </section>
+
+<section class="card compact" id="plugins-sublist3r-proxy-config">
+  <div class="panel-head">
+    <h4>Proxy</h4>
+  </div>
+  <div class="stack" style="gap:.5rem;">
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" class="sublist3r-opt-proxy" checked />
+      Route requests through Roxy proxy
+    </label>
+    <label style="display:flex;flex-direction:column;gap:.2rem;font-size:.85rem;">
+      Roxy proxy port
+      <input type="number" class="sublist3r-opt-proxy-port" value="8080" min="1" max="65535" style="width:8rem;" />
+    </label>
+  </div>
+</section>

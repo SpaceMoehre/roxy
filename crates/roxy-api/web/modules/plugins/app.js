@@ -119,6 +119,23 @@
       if (ui && ui.init) {
         ui.init(container, settings || {}, ctx);
       }
+
+      // Deliver any pending request sent via the right-click context menu.
+      if (
+        window.__roxyPendingPluginRequest &&
+        window.__roxyPendingPluginRequest.pluginName === pluginId
+      ) {
+        const pending = window.__roxyPendingPluginRequest;
+        window.__roxyPendingPluginRequest = null;
+        if (ui && typeof ui.onRequestReceived === "function") {
+          try {
+            ui.onRequestReceived(container, pending.request, ctx);
+          } catch (err) {
+            ctx.toast(`Plugin failed to receive request: ${err.message}`);
+          }
+        }
+      }
+
       if (ui && ui.loadAlterations) {
         ui.loadAlterations(container, pluginId, ctx);
       }

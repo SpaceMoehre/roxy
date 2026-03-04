@@ -17,6 +17,7 @@ class UiModuleDefinition:
     settings_html: str
     script_js: str
     nav_hidden: bool = False
+    accepts_request: bool = False
 
 
 class PluginBuilder:

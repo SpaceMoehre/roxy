@@ -35,6 +35,7 @@ use std::{
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
@@ -142,7 +143,7 @@ impl ProxyMiddleware for PluginBridgeMiddleware {
         for result in plugin_results {
             match result {
                 Ok(response) => {
-                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output);
+                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output, Some(&response.plugin));
                     let before = out.raw.clone();
                     out = apply_request_middleware_output(out, &response.output)?;
                     if out.raw != before {
@@ -207,7 +208,7 @@ impl ProxyMiddleware for PluginBridgeMiddleware {
         for result in plugin_results {
             match result {
                 Ok(response) => {
-                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output);
+                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output, Some(&response.plugin));
                     let before_status = out.status;
                     let before_headers = out.headers.clone();
                     let before_body = out.body.clone();
@@ -269,6 +270,11 @@ async fn main() -> Result<()> {
 
     let app_state = Arc::new(AppState::new());
     let cert_manager = Arc::new(CertManager::load_or_create(data_dir.join("certs"))?);
+
+    // Install the Roxy root CA into the system trust store so tools that
+    // proxy through Roxy (e.g. Photon, Sublist3r) accept MITM-signed certs.
+    install_ca_to_system_trust(&data_dir.join("certs").join("ca-cert.pem"), &data_dir, bind);
+
     let storage = StorageManager::open(data_dir.join("storage"))?;
     let plugins = PluginManager::default();
     if let Some(venv_python) = ensure_plugin_venv(&data_dir) {
@@ -305,6 +311,7 @@ async fn main() -> Result<()> {
                         &app_state_for_plugins,
                         &ui_modules_for_plugins,
                         &response.output,
+                        Some(&response.plugin),
                     );
                 }
             }
@@ -888,7 +895,7 @@ async fn auto_register_plugins(
             .await
         {
             Ok(result) => {
-                let applied = apply_plugin_output_ops(app_state, ui_modules, &result.output);
+                let applied = apply_plugin_output_ops(app_state, ui_modules, &result.output, Some(&plugin_name));
                 info!(
                     %plugin_name,
                     state_ops_applied = applied.state_ops_applied,
@@ -1038,14 +1045,163 @@ fn ensure_plugin_venv(data_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// System CA trust installation
+// ---------------------------------------------------------------------------
+
+/// Install the Roxy root CA into the OS trust store so that subprocess tools
+/// (Python plugins proxying through Roxy) accept MITM-signed certificates
+/// without any manual configuration.
+///
+/// **Strategy:**
+///
+/// 1.  Copy the PEM to `/usr/local/share/ca-certificates/roxy-ca.crt` and
+///     run `update-ca-certificates` (Debian / Ubuntu).  This is the cleanest
+///     approach and makes *every* library that uses the system trust store
+///     just work.
+///
+/// 2.  If that fails (e.g. the process is not running as root), build a
+///     combined CA bundle (`<data_dir>/certs/ca-bundle-combined.pem`) that
+///     contains the default system certificates plus the Roxy CA, then
+///     export `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` into the process
+///     environment so child processes inherit them.
+fn install_ca_to_system_trust(ca_pem_path: &Path, data_dir: &Path, bind: SocketAddr) {
+    let pem = match fs::read_to_string(ca_pem_path) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!(%err, path = %ca_pem_path.display(),
+                  "could not read CA cert – skipping system trust installation");
+            return;
+        }
+    };
+
+    // ── Attempt 1: system-wide install via update-ca-certificates ────────
+    let system_wide_ok = try_system_wide_install(&pem);
+    if system_wide_ok {
+        info!("Roxy CA installed into system trust store");
+    } else {
+        info!("system-wide CA install not possible – falling back to combined CA bundle");
+        let api_url = format!("http://{bind}/api/v1/ca/cert.pem");
+        warn!(
+            "\n\n\
+             ╔══════════════════════════════════════════════════════════════════════╗\n\
+             ║  Roxy could not install its CA certificate system-wide.             ║\n\
+             ║  To trust HTTPS traffic through Roxy, install it manually:          ║\n\
+             ║                                                                     ║\n\
+             ║  Linux (Debian/Ubuntu):                                             ║\n\
+             ║    sudo wget -qO /usr/local/share/ca-certificates/roxy-ca.crt \\     \n\
+             ║      {api_url}                                                      \n\
+             ║    sudo update-ca-certificates                                      ║\n\
+             ║                                                                     ║\n\
+             ║  macOS:                                                             ║\n\
+             ║    wget -qO /tmp/roxy-ca.pem {api_url}                              \n\
+             ║    sudo security add-trusted-cert -d -r trustRoot \\                  \n\
+             ║      -k /Library/Keychains/System.keychain /tmp/roxy-ca.pem         ║\n\
+             ╚══════════════════════════════════════════════════════════════════════╝\n",
+        );
+    }
+
+    // Always create bundle + set env vars – Python's `requests` library uses
+    // its own `certifi` CA bundle and ignores the system trust store, so
+    // `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` must be set for child processes.
+    if let Err(err) = install_ca_via_env_bundle(ca_pem_path, data_dir, &pem) {
+        warn!(%err, "failed to create combined CA bundle");
+    }
+}
+
+/// Try to copy the cert into the system CA directory and run
+/// `update-ca-certificates`.  Returns `true` on success.
+fn try_system_wide_install(pem: &str) -> bool {
+    let dest = Path::new("/usr/local/share/ca-certificates/roxy-ca.crt");
+
+    // Skip the write + update if the cert is already installed and identical.
+    if dest.exists() {
+        if let Ok(existing) = fs::read_to_string(dest) {
+            if existing == pem {
+                return update_ca_certificates_runs_ok();
+            }
+        }
+    }
+
+    if let Some(parent) = dest.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+    if fs::write(dest, pem).is_err() {
+        return false;
+    }
+
+    update_ca_certificates_runs_ok()
+}
+
+fn update_ca_certificates_runs_ok() -> bool {
+    Command::new("update-ca-certificates")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Build a PEM bundle that combines all system CA certificates with the Roxy
+/// CA and export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` so child processes
+/// (Python plugins) pick it up automatically.
+fn install_ca_via_env_bundle(_ca_pem_path: &Path, data_dir: &Path, roxy_pem: &str) -> Result<()> {
+    // Locate the system CA bundle – common paths on Debian, RHEL, Alpine.
+    let system_bundle = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+    ]
+    .iter()
+    .map(Path::new)
+    .find(|p| p.exists());
+
+    let mut combined = String::new();
+    if let Some(bundle) = system_bundle {
+        combined = fs::read_to_string(bundle)
+            .with_context(|| format!("failed reading system CA bundle {:?}", bundle))?;
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+    combined.push_str(roxy_pem);
+    if !combined.ends_with('\n') {
+        combined.push('\n');
+    }
+
+    let combined_path = data_dir.join("certs").join("ca-bundle-combined.pem");
+    fs::write(&combined_path, &combined)
+        .with_context(|| format!("failed writing combined CA bundle {:?}", combined_path))?;
+
+    let abs = combined_path
+        .canonicalize()
+        .unwrap_or_else(|_| combined_path.clone());
+    let abs_str = abs.to_string_lossy().to_string();
+
+    // SAFETY: called once during single-threaded startup, before any
+    // multi-threaded work that reads these variables.
+    unsafe {
+        env::set_var("SSL_CERT_FILE", &abs_str);
+        env::set_var("REQUESTS_CA_BUNDLE", &abs_str);
+    }
+    info!(
+        path = %abs_str,
+        "exported SSL_CERT_FILE and REQUESTS_CA_BUNDLE for child processes"
+    );
+    Ok(())
+}
+
 fn apply_plugin_output_ops(
     app_state: &AppState,
     ui_modules: &UiModuleRegistry,
     output: &Value,
+    plugin_name: Option<&str>,
 ) -> PluginOpsApplied {
     PluginOpsApplied {
         state_ops_applied: apply_plugin_state_ops(app_state, output),
-        ui_modules_registered: apply_plugin_ui_modules(ui_modules, output),
+        ui_modules_registered: apply_plugin_ui_modules(ui_modules, output, plugin_name),
     }
 }
 
@@ -1096,7 +1252,7 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     applied
 }
 
-fn apply_plugin_ui_modules(ui_modules: &UiModuleRegistry, output: &Value) -> usize {
+fn apply_plugin_ui_modules(ui_modules: &UiModuleRegistry, output: &Value, plugin_name: Option<&str>) -> usize {
     let Some(modules) = output.get("register_ui_modules").and_then(Value::as_array) else {
         return 0;
     };
@@ -1132,6 +1288,11 @@ fn apply_plugin_ui_modules(ui_modules: &UiModuleRegistry, output: &Value) -> usi
                 .get("nav_hidden")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            accepts_request: module
+                .get("accepts_request")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            plugin_name: plugin_name.map(str::to_string),
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),
@@ -1420,7 +1581,7 @@ mod tests {
             ]
         });
 
-        let applied = apply_plugin_output_ops(&app_state, &modules, &output);
+        let applied = apply_plugin_output_ops(&app_state, &modules, &output, None);
         assert_eq!(applied.state_ops_applied, 1);
         assert_eq!(applied.ui_modules_registered, 1);
         assert!(app_state.intercept_enabled());

@@ -915,6 +915,21 @@ function sendRequestToRepeater(request) {
   toast('Request sent to Repeater form');
 }
 
+function sendRequestToPlugin(request, pluginName) {
+  window.__roxyPendingPluginRequest = {
+    pluginName: pluginName,
+    request: request,
+  };
+  setSelectedPlugin(pluginName);
+  activateTab('plugins');
+  const select = qs('plugins-select');
+  if (select) {
+    select.value = pluginName;
+    select.dispatchEvent(new Event('change'));
+  }
+  toast(`Request sent to ${pluginName}`);
+}
+
 function requestPluginHook(plugin) {
   if (!plugin || !Array.isArray(plugin.hooks)) {
     return null;
@@ -1046,10 +1061,34 @@ async function openRequestContextMenu(event, request) {
     plugins = [];
   }
   const requestPlugins = requestCapablePlugins(plugins);
-  if (requestPlugins.length > 0) {
+
+  let uiModules = [];
+  try {
+    uiModules = await api('/ui/modules');
+  } catch {
+    uiModules = [];
+  }
+  const acceptingModules = Array.isArray(uiModules)
+    ? uiModules.filter((m) => m.accepts_request && m.plugin_name)
+    : [];
+
+  // Deduplicate: prefer UI module-based "send to" over hook-based invocation
+  const uiModulePluginNames = new Set(acceptingModules.map((m) => m.plugin_name));
+  const hookOnlyPlugins = requestPlugins.filter(
+    (row) => !uiModulePluginNames.has(row.plugin.name)
+  );
+
+  if (acceptingModules.length > 0 || hookOnlyPlugins.length > 0) {
     addRequestContextMenuSeparator(menu);
     addRequestContextMenuGroup(menu, 'Send to Plugin');
-    for (const row of requestPlugins) {
+
+    for (const mod of acceptingModules) {
+      addRequestContextMenuItem(menu, mod.plugin_name, () => {
+        sendRequestToPlugin(request, mod.plugin_name);
+      });
+    }
+
+    for (const row of hookOnlyPlugins) {
       addRequestContextMenuItem(menu, row.plugin.name, async () => {
         await api(`/plugins/${encodeURIComponent(row.plugin.name)}/invoke`, {
           method: 'POST',

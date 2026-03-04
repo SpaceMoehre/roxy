@@ -21,6 +21,13 @@ pub struct UiModule {
     /// When `true` the module is loaded but hidden from the nav bar.
     #[serde(default)]
     pub nav_hidden: bool,
+    /// When `true` the module advertises that it can receive a request
+    /// object via the right-click "Send to" context-menu action.
+    #[serde(default)]
+    pub accepts_request: bool,
+    /// Name of the plugin that registered this module, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_name: Option<String>,
     /// HTML fragment rendered into the main panel area.
     pub panel_html: String,
     /// HTML fragment rendered inside the global settings dialog.
@@ -43,6 +50,8 @@ impl UiModule {
             id: id.to_string(),
             title: title.to_string(),
             nav_hidden: false,
+            accepts_request: false,
+            plugin_name: None,
             panel_html: panel_html.to_string(),
             settings_html: settings_html.to_string(),
             script_js: script_js.to_string(),

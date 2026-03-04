@@ -360,6 +360,16 @@ def run_photon_crawl(url: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     level = int(settings.get("level", 2))
     effective_timeout = min(max_timeout, 300 + 60 * level)
 
+    # Build subprocess environment, optionally routing through Roxy proxy.
+    sub_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
+    if settings.get("proxy_through_roxy", True):
+        proxy_port = int(settings.get("roxy_proxy_port", 8080))
+        proxy_url = f"http://127.0.0.1:{proxy_port}"
+        sub_env["HTTP_PROXY"] = proxy_url
+        sub_env["HTTPS_PROXY"] = proxy_url
+        sub_env["http_proxy"] = proxy_url
+        sub_env["https_proxy"] = proxy_url
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -367,7 +377,7 @@ def run_photon_crawl(url: str, settings: Dict[str, Any]) -> Dict[str, Any]:
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(_PHOTON_DIR.resolve()),
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"},
+            env=sub_env,
         )
 
         # Stream stdout in real-time for progress.
@@ -496,6 +506,7 @@ def handle(hook: str, payload: dict) -> dict:
                 id="photon-crawler",
                 title="Photon Crawler",
                 nav_hidden=True,
+                accepts_request=True,
                 panel_html=PANEL_HTML,
                 settings_html=SETTINGS_HTML,
                 script_js=SCRIPT_JS,
