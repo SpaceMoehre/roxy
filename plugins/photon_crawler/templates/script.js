@@ -1,11 +1,14 @@
 (function () {
   const PLUGIN_ID = "photon-crawler";
 
-  // ---- State ----
-  let _crawling = false;
-  let _currentScanId = null;
-  let _lastResults = {};
+  // ---- Per-job state (supports multiple parallel crawls) ----
+  const _jobs = new Map();       // scanId → { target, status, startTime, results, summary, totalFindings, error, elapsed }
+  let _selectedJobId = null;     // which job's results are displayed
+  let _lastResults = {};         // results of the selected job (for tab rendering)
   let _activeCategory = "internal";
+  let _container = null;         // saved by init() for queueUrl()
+  let _ctx = null;
+  let _timerHandle = null;
 
   // ---- Helpers ----
 
@@ -40,6 +43,96 @@
     out.scrollTop = out.scrollHeight;
     const details = container.querySelector(".photon-output-details");
     if (details && !details.open) details.open = true;
+  }
+
+  function extractHost(urlStr) {
+    try { return new URL(urlStr).hostname; }
+    catch (_) { return urlStr.replace(/^https?:\/\//, "").split("/")[0].split(":")[0]; }
+  }
+
+  // ---- Jobs tracking ----
+
+  function runningCount() {
+    let n = 0;
+    for (const j of _jobs.values()) if (j.status === "running") n++;
+    return n;
+  }
+
+  function fmtTime(ms) {
+    const s = Math.round(ms / 1000);
+    return s >= 60 ? Math.floor(s / 60) + "m " + (s % 60) + "s" : s + "s";
+  }
+
+  function renderJobs(container) {
+    const list = qs(container, "photon-jobs-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const badge = qs(container, "photon-jobs-count");
+    if (badge) {
+      const r = runningCount();
+      badge.textContent = r > 0 ? r + " running / " + _jobs.size + " total" : String(_jobs.size || "");
+    }
+    const section = container.querySelector("#plugins-photon-jobs");
+    if (section) section.style.display = _jobs.size ? "" : "none";
+    if (_jobs.size === 0) return;
+
+    for (const [id, job] of [..._jobs.entries()].reverse()) {
+      const row = document.createElement("div");
+      row.className = "scroll-item";
+      const sel = id === _selectedJobId;
+      row.style.cssText =
+        "display:flex;align-items:center;gap:.5rem;padding:.35rem .5rem;cursor:pointer;" +
+        "border-left:3px solid " + (sel ? "var(--color-accent,#3498db)" : "transparent") + ";" +
+        "background:" + (sel ? "var(--color-surface-alt,rgba(52,152,219,.08))" : "transparent") + ";";
+
+      const dot = document.createElement("span");
+      dot.style.cssText = "flex-shrink:0;font-size:.85rem;";
+      if (job.status === "running") { dot.textContent = "\u25cf"; dot.style.color = "#f39c12"; }
+      else if (job.status === "done") { dot.textContent = "\u2713"; dot.style.color = "#2ecc71"; }
+      else { dot.textContent = "\u2717"; dot.style.color = "#e74c3c"; }
+
+      const lbl = document.createElement("span");
+      lbl.textContent = extractHost(job.target);
+      lbl.title = job.target;
+      lbl.style.cssText =
+        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+        "font-family:var(--font-mono,monospace);font-size:.82rem;";
+
+      const meta = document.createElement("span");
+      meta.style.cssText = "font-size:.72rem;color:var(--color-muted,#888);white-space:nowrap;";
+      if (job.status === "running") meta.textContent = fmtTime(Date.now() - job.startTime);
+      else if (job.status === "done") meta.textContent = (job.totalFindings || 0) + " findings";
+      else meta.textContent = "error";
+
+      row.append(dot, lbl, meta);
+      row.addEventListener("click", () => selectJob(container, id));
+      list.appendChild(row);
+    }
+  }
+
+  function selectJob(container, scanId) {
+    _selectedJobId = scanId;
+    renderJobs(container);
+    const job = _jobs.get(scanId);
+    if (!job) return;
+    if (job.status === "done" && job.results) {
+      renderResults(container, {
+        results: job.results, summary: job.summary,
+        total_findings: job.totalFindings, elapsed_seconds: job.elapsed, url: job.target,
+      });
+    } else if (job.status === "error") {
+      setStatus(container, "Error: " + (job.error || "unknown"), true);
+      const sect = container.querySelector("#plugins-photon-results");
+      if (sect) sect.style.display = "none";
+    }
+  }
+
+  function ensureTimerRunning(container) {
+    if (_timerHandle) return;
+    _timerHandle = setInterval(() => {
+      if (runningCount() > 0) renderJobs(container);
+      else { clearInterval(_timerHandle); _timerHandle = null; }
+    }, 1000);
   }
 
   // ---- Results rendering ----
@@ -241,60 +334,56 @@
     };
   }
 
-  // ---- Crawl action ----
+  // ---- Crawl action (parallel — does NOT block on running scans) ----
 
-  async function doCrawl(container, ctx) {
-    if (_crawling) return;
-
-    const urlInput = qs(container, "photon-url");
-    const url = (urlInput?.value || "").trim();
-    if (!url) {
+  async function doCrawl(container, ctx, targetUrl) {
+    const rawUrl = targetUrl || (qs(container, "photon-url")?.value || "").trim();
+    if (!rawUrl) {
       setStatus(container, "Enter a target URL first.", true);
       return;
     }
 
-    const btn = qs(container, "photon-crawl-btn");
-    _crawling = true;
-    _currentScanId = null;
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Crawling\u2026";
+    let url = rawUrl;
+    if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+
+    // Prevent duplicate scan on the same host.
+    const host = extractHost(url);
+    for (const j of _jobs.values()) {
+      if (j.status === "running" && extractHost(j.target) === host) {
+        setStatus(container, "Already scanning " + host + ".", true);
+        return;
+      }
     }
-    setStatus(container, "Starting Photon crawl for " + url + "\u2026", false);
-    clearLiveOutput(container);
 
     const options = gatherOptions(container);
+    setStatus(container, "Starting crawl for " + url + "\u2026", false);
 
     try {
       const resp = await ctx.api(
         `/plugins/${encodeURIComponent(PLUGIN_ID)}/invoke-stream`,
         {
           method: "POST",
-          body: JSON.stringify({
-            hook: "crawl",
-            payload: { url, ...options },
-          }),
+          body: JSON.stringify({ hook: "crawl", payload: { url, ...options } }),
         }
       );
 
       if (resp?.scan_id) {
-        _currentScanId = resp.scan_id;
-        appendLiveOutput(container, "[scan started: " + resp.scan_id.slice(0, 8) + "]");
+        _jobs.set(resp.scan_id, {
+          target: url, status: "running", startTime: Date.now(),
+          results: null, summary: null, totalFindings: 0, error: null, elapsed: null,
+        });
+        _selectedJobId = resp.scan_id;
+        renderJobs(container);
+        ensureTimerRunning(container);
+        appendLiveOutput(container, "[" + resp.scan_id.slice(0, 8) + "] Crawl started: " + url);
+        // Clear input for next target.
+        const inp = qs(container, "photon-url");
+        if (inp && !targetUrl) inp.value = "";
       } else {
         setStatus(container, "Failed to start crawl.", true);
-        _crawling = false;
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "Crawl";
-        }
       }
     } catch (err) {
       setStatus(container, "Crawl failed: " + err.message, true);
-      _crawling = false;
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "Crawl";
-      }
     }
   }
 
@@ -302,7 +391,15 @@
 
   window.RoxyPluginUI = window.RoxyPluginUI || {};
   window.RoxyPluginUI[PLUGIN_ID] = {
+    /** Queue a URL for crawling (called externally, e.g. from request context menu). */
+    queueUrl(url) {
+      if (_container && _ctx) doCrawl(_container, _ctx, url);
+    },
+
     init(container, settings, ctx) {
+      _container = container;
+      _ctx = ctx;
+
       // Apply saved settings to option inputs.
       const setVal = (cls, key, def) => {
         const el = qs(container, cls);
@@ -408,6 +505,10 @@
           }
         });
       }
+
+      // Initially hide jobs section until first scan.
+      const jobsSection = container.querySelector("#plugins-photon-jobs");
+      if (jobsSection) jobsSection.style.display = "none";
     },
 
     readSettings(container, currentSettings) {
@@ -445,24 +546,23 @@
 
     onRealtimeEvent(container, event, ctx) {
       if (!event || !event.payload) return;
-      const payload = event.payload;
+      const p = event.payload;
+      if (p.plugin !== PLUGIN_ID) return;
 
-      if (payload.plugin !== PLUGIN_ID) return;
-      if (_currentScanId && payload.scan_id !== _currentScanId) return;
+      const scanId = p.scan_id;
+      const job = scanId ? _jobs.get(scanId) : null;
 
       // ---- Streaming output ----
       if (event.event === "plugin_stream_output") {
-        const raw = payload.line || "";
+        const raw = p.line || "";
         try {
           const parsed = JSON.parse(raw);
-          if (parsed.message) {
+          if (parsed.message && scanId === _selectedJobId) {
             appendLiveOutput(container, parsed.message);
-            // Update status with latest progress message.
             setStatus(container, parsed.message, !!parsed.error);
           }
         } catch (_) {
-          // Non-JSON output from Photon (e.g. banner, level progress).
-          if (raw.trim()) {
+          if (raw.trim() && scanId === _selectedJobId) {
             appendLiveOutput(container, raw.trim());
           }
         }
@@ -471,44 +571,45 @@
 
       // ---- Scan complete ----
       if (event.event === "plugin_stream_complete") {
-        appendLiveOutput(container, "[crawl complete]");
-
-        const btn = qs(container, "photon-crawl-btn");
-        _crawling = false;
-        _currentScanId = null;
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "Crawl";
+        if (scanId === _selectedJobId) {
+          appendLiveOutput(container, "[crawl complete]");
         }
 
-        const outcome = payload.result || {};
-        if (outcome.error) {
-          setStatus(container, "Error: " + outcome.error, true);
-          return;
-        }
-
+        const outcome = p.result || {};
         const result =
           outcome?.plugin_result?.output?.result ||
           outcome?.plugin_result?.result ||
-          outcome?.result ||
-          {};
+          outcome?.result || {};
 
-        if (result.error) {
-          setStatus(container, "Error: " + result.error, true);
-          return;
+        if (job) {
+          if (result.error || outcome.error) {
+            job.status = "error";
+            job.error = result.error || outcome.error;
+          } else {
+            job.status = "done";
+            job.results = result.results || {};
+            job.summary = result.summary || {};
+            job.totalFindings = result.total_findings || 0;
+            job.elapsed = result.elapsed_seconds;
+          }
         }
 
-        renderResults(container, result);
-        const total = result.total_findings || 0;
-        setStatus(
-          container,
-          `Crawl complete: ${total} finding${total !== 1 ? "s" : ""} from ${result.url || "unknown"}.`,
-          false
-        );
+        renderJobs(container);
 
-        // Update settings last count.
-        const lastCount = document.getElementById("setting-photon-last-count");
-        if (lastCount) lastCount.value = String(total);
+        if (scanId === _selectedJobId && job) {
+          if (job.status === "done") {
+            renderResults(container, {
+              results: job.results, summary: job.summary,
+              total_findings: job.totalFindings, elapsed_seconds: job.elapsed, url: job.target,
+            });
+            const total = job.totalFindings || 0;
+            setStatus(container,
+              "Crawl complete: " + total + " finding" + (total !== 1 ? "s" : "") +
+              " from " + extractHost(job.target) + ".", false);
+          } else {
+            setStatus(container, "Error: " + (job.error || outcome.error || "unknown"), true);
+          }
+        }
 
         return;
       }

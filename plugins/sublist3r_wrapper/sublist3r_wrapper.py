@@ -244,6 +244,23 @@ def _progress(msg: str, **kwargs: Any) -> None:
     print(json.dumps(payload), file=sys.stderr, flush=True)
 
 
+def _extract_domain_from_url(url: str) -> str:
+    """Extract the domain from a full URL string."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or parsed.path.split("/")[0]
+        if host:
+            return host.lower().strip()
+    except Exception:
+        pass
+    d = url.strip().lower()
+    for prefix in ("https://", "http://"):
+        if d.startswith(prefix):
+            d = d[len(prefix):]
+    return d.rstrip("/").split("/")[0].split(":")[0]
+
+
 # ---------------------------------------------------------------------------
 # Main enumeration logic
 # ---------------------------------------------------------------------------
@@ -346,8 +363,13 @@ def handle(hook: str, payload: dict) -> dict:
 
     if hook == "enumerate":
         domain = payload.get("domain", "")
+        # Accept a full URL and extract the domain from it.
         if not domain:
-            builder.set_result({"error": "no domain provided"})
+            url = payload.get("url", "")
+            if url:
+                domain = _extract_domain_from_url(url)
+        if not domain:
+            builder.set_result({"error": "no domain or URL provided"})
             return builder.to_dict()
 
         try:

@@ -1,10 +1,13 @@
 (function () {
   const PLUGIN_ID = "sublist3r-wrapper";
 
-  // ---- State ----
-  let _lastResults = [];
-  let _enumerating = false;
-  let _currentScanId = null;
+  // ---- Per-job state (supports multiple parallel enumerations) ----
+  const _jobs = new Map();       // scanId → { target, domain, status, startTime, subdomains, count, sources, errors, elapsed, error }
+  let _selectedJobId = null;     // which job's results are displayed
+  let _lastResults = [];         // subdomains of the selected job
+  let _container = null;         // saved by init() for queueUrl()
+  let _ctx = null;
+  let _timerHandle = null;
 
   // ---- Helpers ----
 
@@ -116,25 +119,118 @@
     if (details && !details.open) details.open = true;
   }
 
-  // ---- Enumerate action ----
+  function extractDomain(urlOrDomain) {
+    let d = urlOrDomain.trim().toLowerCase();
+    try { d = new URL(d).hostname; } catch (_) {
+      d = d.replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
+    }
+    return d;
+  }
 
-  async function doEnumerate(container, ctx) {
-    if (_enumerating) return;
+  // ---- Jobs tracking ----
 
-    const domainInput = qs(container, "sublist3r-domain");
-    const domain = (domainInput?.value || "").trim();
-    if (!domain) {
-      setStatus(container, "Enter a domain first.", true);
+  function runningCount() {
+    let n = 0;
+    for (const j of _jobs.values()) if (j.status === "running") n++;
+    return n;
+  }
+
+  function fmtTime(ms) {
+    const s = Math.round(ms / 1000);
+    return s >= 60 ? Math.floor(s / 60) + "m " + (s % 60) + "s" : s + "s";
+  }
+
+  function renderJobs(container) {
+    const list = qs(container, "sublist3r-jobs-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const badge = qs(container, "sublist3r-jobs-count");
+    if (badge) {
+      const r = runningCount();
+      badge.textContent = r > 0 ? r + " running / " + _jobs.size + " total" : String(_jobs.size || "");
+    }
+    const section = container.querySelector("#plugins-sublist3r-jobs");
+    if (section) section.style.display = _jobs.size ? "" : "none";
+    if (_jobs.size === 0) return;
+
+    for (const [id, job] of [..._jobs.entries()].reverse()) {
+      const row = document.createElement("div");
+      row.className = "scroll-item";
+      const sel = id === _selectedJobId;
+      row.style.cssText =
+        "display:flex;align-items:center;gap:.5rem;padding:.35rem .5rem;cursor:pointer;" +
+        "border-left:3px solid " + (sel ? "var(--color-accent,#3498db)" : "transparent") + ";" +
+        "background:" + (sel ? "var(--color-surface-alt,rgba(52,152,219,.08))" : "transparent") + ";";
+
+      const dot = document.createElement("span");
+      dot.style.cssText = "flex-shrink:0;font-size:.85rem;";
+      if (job.status === "running") { dot.textContent = "\u25cf"; dot.style.color = "#f39c12"; }
+      else if (job.status === "done") { dot.textContent = "\u2713"; dot.style.color = "#2ecc71"; }
+      else { dot.textContent = "\u2717"; dot.style.color = "#e74c3c"; }
+
+      const lbl = document.createElement("span");
+      lbl.textContent = job.domain;
+      lbl.title = job.target;
+      lbl.style.cssText =
+        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+        "font-family:var(--font-mono,monospace);font-size:.82rem;";
+
+      const meta = document.createElement("span");
+      meta.style.cssText = "font-size:.72rem;color:var(--color-muted,#888);white-space:nowrap;";
+      if (job.status === "running") meta.textContent = fmtTime(Date.now() - job.startTime);
+      else if (job.status === "done") meta.textContent = (job.count || 0) + " subs";
+      else meta.textContent = "error";
+
+      row.append(dot, lbl, meta);
+      row.addEventListener("click", () => selectJob(container, id));
+      list.appendChild(row);
+    }
+  }
+
+  function selectJob(container, scanId) {
+    _selectedJobId = scanId;
+    renderJobs(container);
+    const job = _jobs.get(scanId);
+    if (!job) return;
+    if (job.status === "done" && job.subdomains) {
+      renderResults(container, {
+        subdomains: job.subdomains, count: job.count,
+        sources: job.sources, errors: job.errors, elapsed_seconds: job.elapsed, domain: job.domain,
+      });
+    } else if (job.status === "error") {
+      setStatus(container, "Error: " + (job.error || "unknown"), true);
+      const sect = container.querySelector("#plugins-sublist3r-results");
+      if (sect) sect.style.display = "none";
+    }
+  }
+
+  function ensureTimerRunning(container) {
+    if (_timerHandle) return;
+    _timerHandle = setInterval(() => {
+      if (runningCount() > 0) renderJobs(container);
+      else { clearInterval(_timerHandle); _timerHandle = null; }
+    }, 1000);
+  }
+
+  // ---- Enumerate action (parallel — does NOT block on running scans) ----
+
+  async function doEnumerate(container, ctx, targetUrl) {
+    const raw = targetUrl || (qs(container, "sublist3r-domain")?.value || "").trim();
+    if (!raw) {
+      setStatus(container, "Enter a domain or URL first.", true);
       return;
     }
 
-    const btn = qs(container, "sublist3r-enumerate-btn");
-    _enumerating = true;
-    _currentScanId = null;
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Enumerating\u2026";
+    const domain = extractDomain(raw);
+
+    // Prevent duplicate scan on the same domain.
+    for (const j of _jobs.values()) {
+      if (j.status === "running" && j.domain === domain) {
+        setStatus(container, "Already enumerating " + domain + ".", true);
+        return;
+      }
     }
+
     setStatus(container, "Enumerating subdomains for " + domain + "\u2026", false);
     clearLiveOutput(container);
 
@@ -145,39 +241,45 @@
           method: "POST",
           body: JSON.stringify({
             hook: "enumerate",
-            payload: { domain },
+            payload: { domain, url: raw },
           }),
         }
       );
 
       if (resp?.scan_id) {
-        _currentScanId = resp.scan_id;
-        appendLiveOutput(container, "[scan started: " + resp.scan_id.slice(0, 8) + "]");
+        _jobs.set(resp.scan_id, {
+          target: raw, domain, status: "running", startTime: Date.now(),
+          subdomains: null, count: 0, sources: null, errors: null, elapsed: null, error: null,
+        });
+        _selectedJobId = resp.scan_id;
+        renderJobs(container);
+        ensureTimerRunning(container);
+        appendLiveOutput(container, "[" + resp.scan_id.slice(0, 8) + "] Enumerating: " + domain);
+        // Clear input for next target.
+        const inp = qs(container, "sublist3r-domain");
+        if (inp && !targetUrl) inp.value = "";
       } else {
-        // Fallback: endpoint returned an error before streaming started.
         setStatus(container, "Failed to start scan.", true);
-        _enumerating = false;
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "Enumerate";
-        }
       }
     } catch (err) {
       setStatus(container, "Enumerate failed: " + err.message, true);
-      _enumerating = false;
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "Enumerate";
-      }
     }
-    // NOTE: Button stays disabled until plugin_stream_complete arrives via WS.
+    // NOTE: Scan runs in background; results arrive via WS events.
   }
 
   // ---- RoxyPluginUI interface ----
 
   window.RoxyPluginUI = window.RoxyPluginUI || {};
   window.RoxyPluginUI[PLUGIN_ID] = {
+    /** Queue a URL for subdomain enumeration (called externally, e.g. from request context menu). */
+    queueUrl(url) {
+      if (_container && _ctx) doEnumerate(_container, _ctx, url);
+    },
+
     init(container, settings, ctx) {
+      _container = container;
+      _ctx = ctx;
+
       // Populate source checkboxes from settings.
       const optApi = qs(container, "sublist3r-opt-api");
       const optCrt = qs(container, "sublist3r-opt-crtsh");
@@ -204,6 +306,10 @@
           }
         });
       }
+
+      // Initially hide jobs section until first scan.
+      const jobsSection = container.querySelector("#plugins-sublist3r-jobs");
+      if (jobsSection) jobsSection.style.display = "none";
 
       // Add All to Scope.
       const addAllBtn = qs(container, "sublist3r-add-all");
@@ -278,62 +384,65 @@
 
     onRealtimeEvent(container, event, ctx) {
       if (!event || !event.payload) return;
-      const payload = event.payload;
+      const p = event.payload;
+      if (p.plugin !== PLUGIN_ID) return;
 
-      // Only handle events for our current scan.
-      if (payload.plugin !== PLUGIN_ID) return;
-      if (_currentScanId && payload.scan_id !== _currentScanId) return;
+      const scanId = p.scan_id;
+      const job = scanId ? _jobs.get(scanId) : null;
 
       if (event.event === "plugin_stream_output") {
-        // Parse the line — Python emits JSON with a "message" field.
-        const raw = payload.line || "";
+        const raw = p.line || "";
         try {
           const parsed = JSON.parse(raw);
-          if (parsed.message) {
+          if (parsed.message && scanId === _selectedJobId) {
             appendLiveOutput(container, parsed.message);
           }
-          // Ignore JSON lines without a message (internal bookkeeping).
-        } catch (_) {
-          // Non-JSON lines (e.g. tracebacks from subprocesses) — skip.
-        }
+        } catch (_) {}
         return;
       }
 
       if (event.event === "plugin_stream_complete") {
-        appendLiveOutput(container, "[scan complete]");
-
-        const btn = qs(container, "sublist3r-enumerate-btn");
-        _enumerating = false;
-        _currentScanId = null;
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "Enumerate";
+        if (scanId === _selectedJobId) {
+          appendLiveOutput(container, "[scan complete]");
         }
 
-        const outcome = payload.result || {};
-        if (outcome.error) {
-          setStatus(container, "Error: " + outcome.error, true);
-          return;
-        }
-
+        const outcome = p.result || {};
         const result =
           outcome?.plugin_result?.output?.result ||
           outcome?.plugin_result?.result ||
-          outcome?.result ||
-          {};
+          outcome?.result || {};
 
-        if (result.error) {
-          setStatus(container, "Error: " + result.error, true);
-          return;
+        if (job) {
+          if (result.error || outcome.error) {
+            job.status = "error";
+            job.error = result.error || outcome.error;
+          } else {
+            job.status = "done";
+            job.subdomains = result.subdomains || [];
+            job.count = (result.subdomains || []).length;
+            job.sources = result.sources;
+            job.errors = result.errors;
+            job.elapsed = result.elapsed_seconds;
+          }
         }
 
-        renderResults(container, result);
-        const count = (result.subdomains || []).length;
-        setStatus(
-          container,
-          `Found ${count} subdomain${count !== 1 ? "s" : ""} for ${result.domain || "unknown"}.`,
-          false
-        );
+        renderJobs(container);
+
+        if (scanId === _selectedJobId && job) {
+          if (job.status === "done") {
+            renderResults(container, {
+              subdomains: job.subdomains, count: job.count,
+              sources: job.sources, errors: job.errors,
+              elapsed_seconds: job.elapsed, domain: job.domain,
+            });
+            const count = job.count || 0;
+            setStatus(container,
+              "Found " + count + " subdomain" + (count !== 1 ? "s" : "") +
+              " for " + job.domain + ".", false);
+          } else {
+            setStatus(container, "Error: " + (job.error || outcome.error || "unknown"), true);
+          }
+        }
         return;
       }
     },
