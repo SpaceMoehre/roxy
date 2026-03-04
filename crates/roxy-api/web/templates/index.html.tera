@@ -166,7 +166,23 @@
             <article class="card">
               <div class="panel-head">
                 <h3>All Captured Requests</h3>
-                <button id="refresh-proxy-history">Refresh History</button>
+                <div class="panel-head-actions">
+                  <button
+                    type="button"
+                    id="open-proxy-history-filter"
+                    class="proxy-history-filter-button"
+                    aria-haspopup="dialog"
+                    aria-controls="proxy-history-filter-overlay"
+                    aria-expanded="false"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 5h16l-6 7v6l-4 2v-8z"></path>
+                    </svg>
+                    <span>Filter</span>
+                    <span id="proxy-history-filter-badge" class="proxy-history-filter-badge" hidden>0</span>
+                  </button>
+                  <button id="refresh-proxy-history">Refresh History</button>
+                </div>
               </div>
               <div class="proxy-history-layout">
                 <div class="proxy-history-upper">
@@ -174,7 +190,10 @@
                 </div>
                 <div class="proxy-history-lower">
                   <div class="proxy-history-toolbar">
-                    <div id="proxy-history-meta" class="status">No request selected</div>
+                    <div class="proxy-history-toolbar-meta">
+                      <div id="proxy-history-meta" class="status">No request selected</div>
+                      <div id="proxy-history-filter-summary" class="status proxy-history-filter-summary">Showing 0 of 0</div>
+                    </div>
                     <div class="proxy-history-mode-buttons" aria-label="Proxy history view mode">
                       <button type="button" class="history-mode-btn" id="proxy-history-mode-request" data-history-mode="request" aria-label="Show request">
                         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -312,6 +331,88 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div id="proxy-history-filter-overlay" class="proxy-history-filter-overlay" hidden>
+      <div id="proxy-history-filter-backdrop" class="proxy-history-filter-backdrop" aria-hidden="true"></div>
+      <section
+        id="proxy-history-filter-panel"
+        class="proxy-history-filter-panel card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="proxy-history-filter-title"
+      >
+        <div class="panel-head">
+          <h3 id="proxy-history-filter-title">HTTP History Filter</h3>
+          <button type="button" id="close-proxy-history-filter">Cancel</button>
+        </div>
+        <div class="proxy-history-filter-grid">
+          <section class="proxy-history-filter-group">
+            <h4>Filter by request type</h4>
+            <label><input type="checkbox" id="proxy-history-filter-in-scope" /> Show only in-scope items</label>
+            <label><input type="checkbox" id="proxy-history-filter-hide-no-response" /> Hide items without responses</label>
+            <label><input type="checkbox" id="proxy-history-filter-parameterized" /> Show only parameterized requests</label>
+          </section>
+          <section class="proxy-history-filter-group">
+            <h4>Filter by MIME type</h4>
+            <div class="proxy-history-filter-check-grid">
+              <label><input type="checkbox" id="proxy-history-filter-mime-html" /> HTML</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-script" /> Script</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-xml" /> XML</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-css" /> CSS</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-images" /> Images</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-flash" /> Flash</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-other-text" /> Other text</label>
+              <label><input type="checkbox" id="proxy-history-filter-mime-other-binary" /> Other binary</label>
+            </div>
+          </section>
+          <section class="proxy-history-filter-group">
+            <h4>Filter by status code</h4>
+            <div class="proxy-history-filter-check-grid">
+              <label><input type="checkbox" id="proxy-history-filter-status-2xx" /> 2xx [success]</label>
+              <label><input type="checkbox" id="proxy-history-filter-status-3xx" /> 3xx [redirect]</label>
+              <label><input type="checkbox" id="proxy-history-filter-status-4xx" /> 4xx [request error]</label>
+              <label><input type="checkbox" id="proxy-history-filter-status-5xx" /> 5xx [server error]</label>
+              <label><input type="checkbox" id="proxy-history-filter-status-no-response" /> No response</label>
+            </div>
+          </section>
+          <section class="proxy-history-filter-group">
+            <h4>Filter by search term</h4>
+            <input id="proxy-history-filter-search-term" placeholder="header, body token, path..." />
+            <div class="proxy-history-filter-check-grid">
+              <label><input type="checkbox" id="proxy-history-filter-search-regex" /> Regex</label>
+              <label><input type="checkbox" id="proxy-history-filter-search-case" /> Case sensitive</label>
+              <label><input type="checkbox" id="proxy-history-filter-search-negative" /> Negative search</label>
+            </div>
+          </section>
+          <section class="proxy-history-filter-group">
+            <h4>Filter by file extension</h4>
+            <div class="proxy-history-filter-row">
+              <label><input type="checkbox" id="proxy-history-filter-show-ext-enabled" /> Show only:</label>
+              <input id="proxy-history-filter-show-ext" placeholder="asp,aspx,jsp,php" spellcheck="false" />
+            </div>
+            <div class="proxy-history-filter-row">
+              <label><input type="checkbox" id="proxy-history-filter-hide-ext-enabled" /> Hide:</label>
+              <input id="proxy-history-filter-hide-ext" placeholder="js,gif,jpg,png,ico,css,woff,woff2" spellcheck="false" />
+            </div>
+          </section>
+          <section class="proxy-history-filter-group">
+            <h4>Filter by listener</h4>
+            <div class="proxy-history-filter-row">
+              <label for="proxy-history-filter-port">Port</label>
+              <input id="proxy-history-filter-port" inputmode="numeric" placeholder="8080" />
+            </div>
+          </section>
+        </div>
+        <div id="proxy-history-filter-error" class="status proxy-history-filter-error" aria-live="polite"></div>
+        <div class="proxy-history-filter-actions">
+          <button type="button" id="proxy-history-filter-show-all">Show all</button>
+          <button type="button" id="proxy-history-filter-hide-all">Hide all</button>
+          <button type="button" id="proxy-history-filter-revert">Revert changes</button>
+          <button type="button" id="proxy-history-filter-apply">Apply</button>
+          <button type="button" id="proxy-history-filter-apply-close" class="accent">Apply &amp; Close</button>
+        </div>
+      </section>
     </div>
 
     <div id="request-context-menu" class="context-menu" role="menu" hidden></div>

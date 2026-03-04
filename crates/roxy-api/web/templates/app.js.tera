@@ -11,7 +11,10 @@ const appState = {
   historySearchQuery: '',
   selectedIntruderJob: null,
   historySearchRows: [],
+  proxyHistoryAllRows: [],
   proxyHistoryRows: [],
+  proxyHistoryFilters: defaultProxyHistoryFilters(),
+  scopeHosts: [],
   pendingRequestRows: [],
   proxyHistoryMode: 'both',
   upstreamSettingsSaveTimer: null,
@@ -20,6 +23,27 @@ const appState = {
   toastTimer: null,
   settings: loadUiSettings(),
 };
+
+const proxyHistoryFilterSelectionToggleIds = [
+  'proxy-history-filter-in-scope',
+  'proxy-history-filter-hide-no-response',
+  'proxy-history-filter-parameterized',
+  'proxy-history-filter-mime-html',
+  'proxy-history-filter-mime-script',
+  'proxy-history-filter-mime-xml',
+  'proxy-history-filter-mime-css',
+  'proxy-history-filter-mime-images',
+  'proxy-history-filter-mime-flash',
+  'proxy-history-filter-mime-other-text',
+  'proxy-history-filter-mime-other-binary',
+  'proxy-history-filter-status-2xx',
+  'proxy-history-filter-status-3xx',
+  'proxy-history-filter-status-4xx',
+  'proxy-history-filter-status-5xx',
+  'proxy-history-filter-status-no-response',
+  'proxy-history-filter-show-ext-enabled',
+  'proxy-history-filter-hide-ext-enabled',
+];
 
 const moduleRegistry = new Map();
 const moduleIntervals = new Map();
@@ -36,6 +60,708 @@ window.RoxyModuleHost = {
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+function defaultProxyHistoryFilters() {
+  return {
+    showOnlyInScope: false,
+    hideNoResponse: false,
+    showOnlyParameterized: false,
+    mime: {
+      html: true,
+      script: true,
+      xml: true,
+      css: true,
+      images: true,
+      flash: true,
+      otherText: true,
+      otherBinary: true,
+    },
+    status: {
+      s2xx: true,
+      s3xx: true,
+      s4xx: true,
+      s5xx: true,
+      noResponse: true,
+    },
+    searchTerm: '',
+    searchRegex: false,
+    searchCaseSensitive: false,
+    searchNegative: false,
+    showOnlyExtensionsEnabled: false,
+    showOnlyExtensions: '',
+    hideExtensionsEnabled: false,
+    hideExtensions: '',
+    listenerPort: '',
+  };
+}
+
+function cloneProxyHistoryFilters(filters) {
+  const base = defaultProxyHistoryFilters();
+  const source = filters && typeof filters === 'object' ? filters : {};
+  return {
+    ...base,
+    ...source,
+    mime: {
+      ...base.mime,
+      ...(source.mime || {}),
+    },
+    status: {
+      ...base.status,
+      ...(source.status || {}),
+    },
+  };
+}
+
+function proxyHistoryFilterOverlayOpen() {
+  const overlay = qs('proxy-history-filter-overlay');
+  return Boolean(overlay && !overlay.hidden);
+}
+
+function setProxyHistoryFilterError(message) {
+  const error = qs('proxy-history-filter-error');
+  if (error) {
+    error.textContent = String(message || '');
+  }
+}
+
+function proxyHistoryFilterInputValue(id, fallback = '') {
+  const element = qs(id);
+  if (!element) {
+    return fallback;
+  }
+  return String(element.value || '');
+}
+
+function proxyHistoryFilterChecked(id, fallback = false) {
+  const element = qs(id);
+  if (!element) {
+    return fallback;
+  }
+  return Boolean(element.checked);
+}
+
+function proxyHistoryReadFiltersFromForm() {
+  const defaults = defaultProxyHistoryFilters();
+  return {
+    showOnlyInScope: proxyHistoryFilterChecked(
+      'proxy-history-filter-in-scope',
+      defaults.showOnlyInScope,
+    ),
+    hideNoResponse: proxyHistoryFilterChecked(
+      'proxy-history-filter-hide-no-response',
+      defaults.hideNoResponse,
+    ),
+    showOnlyParameterized: proxyHistoryFilterChecked(
+      'proxy-history-filter-parameterized',
+      defaults.showOnlyParameterized,
+    ),
+    mime: {
+      html: proxyHistoryFilterChecked('proxy-history-filter-mime-html', defaults.mime.html),
+      script: proxyHistoryFilterChecked('proxy-history-filter-mime-script', defaults.mime.script),
+      xml: proxyHistoryFilterChecked('proxy-history-filter-mime-xml', defaults.mime.xml),
+      css: proxyHistoryFilterChecked('proxy-history-filter-mime-css', defaults.mime.css),
+      images: proxyHistoryFilterChecked('proxy-history-filter-mime-images', defaults.mime.images),
+      flash: proxyHistoryFilterChecked('proxy-history-filter-mime-flash', defaults.mime.flash),
+      otherText: proxyHistoryFilterChecked(
+        'proxy-history-filter-mime-other-text',
+        defaults.mime.otherText,
+      ),
+      otherBinary: proxyHistoryFilterChecked(
+        'proxy-history-filter-mime-other-binary',
+        defaults.mime.otherBinary,
+      ),
+    },
+    status: {
+      s2xx: proxyHistoryFilterChecked('proxy-history-filter-status-2xx', defaults.status.s2xx),
+      s3xx: proxyHistoryFilterChecked('proxy-history-filter-status-3xx', defaults.status.s3xx),
+      s4xx: proxyHistoryFilterChecked('proxy-history-filter-status-4xx', defaults.status.s4xx),
+      s5xx: proxyHistoryFilterChecked('proxy-history-filter-status-5xx', defaults.status.s5xx),
+      noResponse: proxyHistoryFilterChecked(
+        'proxy-history-filter-status-no-response',
+        defaults.status.noResponse,
+      ),
+    },
+    searchTerm: proxyHistoryFilterInputValue('proxy-history-filter-search-term', '').trim(),
+    searchRegex: proxyHistoryFilterChecked(
+      'proxy-history-filter-search-regex',
+      defaults.searchRegex,
+    ),
+    searchCaseSensitive: proxyHistoryFilterChecked(
+      'proxy-history-filter-search-case',
+      defaults.searchCaseSensitive,
+    ),
+    searchNegative: proxyHistoryFilterChecked(
+      'proxy-history-filter-search-negative',
+      defaults.searchNegative,
+    ),
+    showOnlyExtensionsEnabled: proxyHistoryFilterChecked(
+      'proxy-history-filter-show-ext-enabled',
+      defaults.showOnlyExtensionsEnabled,
+    ),
+    showOnlyExtensions: proxyHistoryFilterInputValue('proxy-history-filter-show-ext', '').trim(),
+    hideExtensionsEnabled: proxyHistoryFilterChecked(
+      'proxy-history-filter-hide-ext-enabled',
+      defaults.hideExtensionsEnabled,
+    ),
+    hideExtensions: proxyHistoryFilterInputValue('proxy-history-filter-hide-ext', '').trim(),
+    listenerPort: proxyHistoryFilterInputValue('proxy-history-filter-port', '').trim(),
+  };
+}
+
+function proxyHistoryWriteFiltersToForm(filters) {
+  const next = cloneProxyHistoryFilters(filters);
+  const setCheckbox = (id, value) => {
+    const element = qs(id);
+    if (element) {
+      element.checked = Boolean(value);
+    }
+  };
+  const setValue = (id, value) => {
+    const element = qs(id);
+    if (element) {
+      element.value = String(value || '');
+    }
+  };
+
+  setCheckbox('proxy-history-filter-in-scope', next.showOnlyInScope);
+  setCheckbox('proxy-history-filter-hide-no-response', next.hideNoResponse);
+  setCheckbox('proxy-history-filter-parameterized', next.showOnlyParameterized);
+  setCheckbox('proxy-history-filter-mime-html', next.mime.html);
+  setCheckbox('proxy-history-filter-mime-script', next.mime.script);
+  setCheckbox('proxy-history-filter-mime-xml', next.mime.xml);
+  setCheckbox('proxy-history-filter-mime-css', next.mime.css);
+  setCheckbox('proxy-history-filter-mime-images', next.mime.images);
+  setCheckbox('proxy-history-filter-mime-flash', next.mime.flash);
+  setCheckbox('proxy-history-filter-mime-other-text', next.mime.otherText);
+  setCheckbox('proxy-history-filter-mime-other-binary', next.mime.otherBinary);
+  setCheckbox('proxy-history-filter-status-2xx', next.status.s2xx);
+  setCheckbox('proxy-history-filter-status-3xx', next.status.s3xx);
+  setCheckbox('proxy-history-filter-status-4xx', next.status.s4xx);
+  setCheckbox('proxy-history-filter-status-5xx', next.status.s5xx);
+  setCheckbox('proxy-history-filter-status-no-response', next.status.noResponse);
+  setValue('proxy-history-filter-search-term', next.searchTerm);
+  setCheckbox('proxy-history-filter-search-regex', next.searchRegex);
+  setCheckbox('proxy-history-filter-search-case', next.searchCaseSensitive);
+  setCheckbox('proxy-history-filter-search-negative', next.searchNegative);
+  setCheckbox('proxy-history-filter-show-ext-enabled', next.showOnlyExtensionsEnabled);
+  setValue('proxy-history-filter-show-ext', next.showOnlyExtensions);
+  setCheckbox('proxy-history-filter-hide-ext-enabled', next.hideExtensionsEnabled);
+  setValue('proxy-history-filter-hide-ext', next.hideExtensions);
+  setValue('proxy-history-filter-port', next.listenerPort);
+}
+
+function setProxyHistoryFilterSelectionState(enabled) {
+  for (const id of proxyHistoryFilterSelectionToggleIds) {
+    const element = qs(id);
+    if (element) {
+      element.checked = Boolean(enabled);
+    }
+  }
+}
+
+function openProxyHistoryFilterPanel() {
+  const overlay = qs('proxy-history-filter-overlay');
+  if (!overlay) {
+    return;
+  }
+  if (!overlay.hidden) {
+    closeProxyHistoryFilterPanel();
+    return;
+  }
+  proxyHistoryWriteFiltersToForm(appState.proxyHistoryFilters);
+  setProxyHistoryFilterError('');
+  overlay.hidden = false;
+  const openButton = qs('open-proxy-history-filter');
+  if (openButton) {
+    openButton.setAttribute('aria-expanded', 'true');
+  }
+  const firstInput = qs('proxy-history-filter-search-term');
+  if (firstInput) {
+    firstInput.focus();
+    firstInput.select();
+  }
+}
+
+function closeProxyHistoryFilterPanel() {
+  const overlay = qs('proxy-history-filter-overlay');
+  if (!overlay) {
+    return;
+  }
+  overlay.hidden = true;
+  setProxyHistoryFilterError('');
+  const openButton = qs('open-proxy-history-filter');
+  if (openButton) {
+    openButton.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function proxyHistoryParseExtensionSet(rawList) {
+  const out = new Set();
+  const parts = String(rawList || '')
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length > 0);
+  for (const part of parts) {
+    const normalized = part.replace(/^\./, '');
+    if (/^[a-z0-9_+-]+$/.test(normalized)) {
+      out.add(normalized);
+    }
+  }
+  return out;
+}
+
+function splitHostAndPort(rawValue) {
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (!value) {
+    return { host: '', port: null };
+  }
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']');
+    if (close > 0) {
+      const host = value.slice(1, close);
+      const portCandidate = value.slice(close + 1);
+      if (portCandidate.startsWith(':')) {
+        const portValue = Number(portCandidate.slice(1));
+        if (Number.isInteger(portValue) && portValue > 0 && portValue <= 65535) {
+          return { host, port: portValue };
+        }
+      }
+      return { host, port: null };
+    }
+  }
+
+  const colonCount = value.split(':').length - 1;
+  if (colonCount === 1) {
+    const idx = value.lastIndexOf(':');
+    const host = value.slice(0, idx);
+    const portValue = Number(value.slice(idx + 1));
+    if (host && Number.isInteger(portValue) && portValue > 0 && portValue <= 65535) {
+      return { host, port: portValue };
+    }
+  }
+
+  if (colonCount > 1) {
+    return { host: value, port: null };
+  }
+  return { host: value, port: null };
+}
+
+function requestHostname(request) {
+  try {
+    const absolute = requestAbsoluteUrl(request);
+    if (absolute) {
+      return String(new URL(absolute).hostname || '').trim().toLowerCase();
+    }
+  } catch {
+    // Ignore URL parse fallback path.
+  }
+  return splitHostAndPort(request?.host).host;
+}
+
+function requestPort(request) {
+  try {
+    const absolute = requestAbsoluteUrl(request);
+    if (absolute) {
+      const parsed = new URL(absolute);
+      if (parsed.port) {
+        return Number(parsed.port);
+      }
+      if (parsed.protocol === 'https:') {
+        return 443;
+      }
+      if (parsed.protocol === 'http:') {
+        return 80;
+      }
+    }
+  } catch {
+    // Ignore URL parse fallback path.
+  }
+
+  const hostParts = splitHostAndPort(request?.host);
+  if (hostParts.port != null) {
+    return hostParts.port;
+  }
+
+  const uri = String(request?.uri || '').trim();
+  if (/^[^/]+:\d+$/.test(uri)) {
+    const port = Number(uri.split(':').pop());
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      return port;
+    }
+  }
+  return null;
+}
+
+function hostMatchesScopePattern(hostname, scopeHost) {
+  const host = String(hostname || '').trim().toLowerCase();
+  const scope = String(scopeHost || '').trim().toLowerCase();
+  if (!host || !scope) {
+    return false;
+  }
+  if (scope.startsWith('*.')) {
+    const suffix = scope.slice(2);
+    return host === suffix || host.endsWith(`.${suffix}`);
+  }
+  return host === scope;
+}
+
+function requestIsInScope(request) {
+  const scopeHosts = Array.isArray(appState.scopeHosts) ? appState.scopeHosts : [];
+  if (!scopeHosts.length) {
+    return true;
+  }
+  const host = requestHostname(request);
+  if (!host) {
+    return false;
+  }
+  return scopeHosts.some((scopeHost) => hostMatchesScopePattern(host, scopeHost));
+}
+
+function requestPathForFiltering(request) {
+  try {
+    const absolute = requestAbsoluteUrl(request);
+    if (absolute) {
+      return String(new URL(absolute).pathname || '/');
+    }
+  } catch {
+    // Ignore URL parse fallback path.
+  }
+
+  const uri = String(request?.uri || '');
+  const noQuery = uri.split(/[?#]/, 1)[0];
+  if (!noQuery) {
+    return '/';
+  }
+  if (/^https?:\/\//i.test(noQuery)) {
+    try {
+      return String(new URL(noQuery).pathname || '/');
+    } catch {
+      return '/';
+    }
+  }
+  return noQuery.startsWith('/') ? noQuery : `/${noQuery}`;
+}
+
+function requestFileExtension(request) {
+  const path = requestPathForFiltering(request);
+  const tail = String(path).split('/').pop() || '';
+  if (!tail || !tail.includes('.')) {
+    return '';
+  }
+  const ext = tail.split('.').pop().trim().toLowerCase();
+  if (!/^[a-z0-9_+-]+$/.test(ext)) {
+    return '';
+  }
+  return ext;
+}
+
+function headerValue(headers, name) {
+  const lookup = String(name || '').toLowerCase();
+  for (const header of Array.isArray(headers) ? headers : []) {
+    const current = String(header?.name || '').toLowerCase();
+    if (current === lookup) {
+      return String(header?.value || '').trim();
+    }
+  }
+  return '';
+}
+
+function responseContentType(response) {
+  const raw = headerValue(response?.headers, 'content-type').toLowerCase();
+  return raw.split(';', 1)[0].trim();
+}
+
+function mimeCategoryFromExtension(ext) {
+  if (!ext) {
+    return null;
+  }
+  if (['html', 'htm', 'shtml'].includes(ext)) return 'html';
+  if (['js', 'mjs', 'cjs', 'ts', 'tsx'].includes(ext)) return 'script';
+  if (['xml', 'xsl', 'xslt'].includes(ext)) return 'xml';
+  if (['css'].includes(ext)) return 'css';
+  if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'avif', 'ico', 'svg', 'tiff'].includes(ext)) return 'images';
+  if (['swf', 'flv'].includes(ext)) return 'flash';
+  if (['txt', 'json', 'csv', 'md', 'yaml', 'yml', 'log'].includes(ext)) return 'otherText';
+  return null;
+}
+
+function proxyHistoryMimeCategory(row) {
+  const response = row?.exchange?.response;
+  if (!response) {
+    return null;
+  }
+  const type = responseContentType(response);
+  if (type.includes('html')) return 'html';
+  if (type.includes('javascript') || type.includes('ecmascript')) return 'script';
+  if (type.includes('xml')) return 'xml';
+  if (type.includes('css')) return 'css';
+  if (type.startsWith('image/')) return 'images';
+  if (type.includes('flash') || type.includes('shockwave')) return 'flash';
+  if (
+    type.startsWith('text/')
+    || type.includes('json')
+    || type.includes('javascript')
+    || type.includes('x-www-form-urlencoded')
+    || type.includes('yaml')
+    || type.includes('csv')
+  ) {
+    return 'otherText';
+  }
+
+  const fallback = mimeCategoryFromExtension(
+    requestFileExtension(row?.exchange?.request || {}),
+  );
+  if (fallback) {
+    return fallback;
+  }
+  return 'otherBinary';
+}
+
+function proxyHistoryStatusBucket(status) {
+  const numeric = Number(status);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  const group = Math.floor(numeric / 100);
+  if (group === 2) return 's2xx';
+  if (group === 3) return 's3xx';
+  if (group === 4) return 's4xx';
+  if (group === 5) return 's5xx';
+  return null;
+}
+
+function proxyHistoryHasAnyEnabled(map) {
+  return Object.values(map || {}).some((value) => Boolean(value));
+}
+
+function proxyHistorySearchText(row) {
+  const request = row?.exchange?.request || {};
+  const response = row?.exchange?.response || null;
+  return [
+    String(request.method || ''),
+    String(request.uri || ''),
+    String(request.host || ''),
+    requestBlobText(request),
+    response ? responseBlobText(response) : '',
+    response && Number.isFinite(Number(response.status)) ? String(response.status) : 'no response',
+  ].join('\n');
+}
+
+function buildProxyHistorySearchMatcher(filters) {
+  const term = String(filters.searchTerm || '').trim();
+  if (!term) {
+    return {
+      ok: true,
+      error: '',
+      matches: () => true,
+    };
+  }
+
+  if (filters.searchRegex) {
+    try {
+      const flags = filters.searchCaseSensitive ? '' : 'i';
+      const regex = new RegExp(term, flags);
+      return {
+        ok: true,
+        error: '',
+        matches: (row) => {
+          const hit = regex.test(proxyHistorySearchText(row));
+          return filters.searchNegative ? !hit : hit;
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Invalid regex: ${err.message}`,
+        matches: () => true,
+      };
+    }
+  }
+
+  const needle = filters.searchCaseSensitive ? term : term.toLowerCase();
+  return {
+    ok: true,
+    error: '',
+    matches: (row) => {
+      const source = proxyHistorySearchText(row);
+      const haystack = filters.searchCaseSensitive ? source : source.toLowerCase();
+      const hit = haystack.includes(needle);
+      return filters.searchNegative ? !hit : hit;
+    },
+  };
+}
+
+function proxyHistoryHasActiveFilters(filters) {
+  const current = cloneProxyHistoryFilters(filters);
+  const defaults = defaultProxyHistoryFilters();
+  const coreToggles = [
+    'showOnlyInScope',
+    'hideNoResponse',
+    'showOnlyParameterized',
+    'showOnlyExtensionsEnabled',
+    'hideExtensionsEnabled',
+  ];
+  if (coreToggles.some((key) => current[key] !== defaults[key])) {
+    return true;
+  }
+  if (Object.keys(defaults.mime).some((key) => current.mime[key] !== defaults.mime[key])) {
+    return true;
+  }
+  if (Object.keys(defaults.status).some((key) => current.status[key] !== defaults.status[key])) {
+    return true;
+  }
+  if (current.searchTerm.trim().length > 0) {
+    return true;
+  }
+  if (current.listenerPort.trim().length > 0) {
+    return true;
+  }
+  if (current.showOnlyExtensionsEnabled && current.showOnlyExtensions.trim().length > 0) {
+    return true;
+  }
+  if (current.hideExtensionsEnabled && current.hideExtensions.trim().length > 0) {
+    return true;
+  }
+  return false;
+}
+
+function renderProxyHistoryFilterSummary() {
+  const visible = appState.proxyHistoryRows.length;
+  const total = appState.proxyHistoryAllRows.length;
+  const hiddenCount = Math.max(0, total - visible);
+  const summary = qs('proxy-history-filter-summary');
+  const badge = qs('proxy-history-filter-badge');
+  const button = qs('open-proxy-history-filter');
+
+  if (summary) {
+    summary.textContent = `Showing ${visible} of ${total}`;
+  }
+  if (badge) {
+    badge.hidden = hiddenCount === 0;
+    if (!badge.hidden) {
+      badge.textContent = String(hiddenCount);
+    }
+  }
+  if (button) {
+    button.classList.toggle('active', proxyHistoryHasActiveFilters(appState.proxyHistoryFilters));
+    button.setAttribute('aria-expanded', proxyHistoryFilterOverlayOpen() ? 'true' : 'false');
+  }
+}
+
+function applyProxyHistoryFilters() {
+  const filters = cloneProxyHistoryFilters(appState.proxyHistoryFilters);
+  const rows = Array.isArray(appState.proxyHistoryAllRows) ? appState.proxyHistoryAllRows : [];
+  const searchMatcher = buildProxyHistorySearchMatcher(filters);
+  const showOnlyExt = proxyHistoryParseExtensionSet(filters.showOnlyExtensions);
+  const hideExt = proxyHistoryParseExtensionSet(filters.hideExtensions);
+  const portFilter = Number(filters.listenerPort);
+  const hasPortFilter =
+    filters.listenerPort.trim().length > 0
+    && Number.isInteger(portFilter)
+    && portFilter > 0
+    && portFilter <= 65535;
+  const statusEnabled = proxyHistoryHasAnyEnabled(filters.status);
+  const mimeEnabled = proxyHistoryHasAnyEnabled(filters.mime);
+
+  appState.proxyHistoryRows = rows.filter((row) => {
+    const request = row?.exchange?.request || {};
+    const response = row?.exchange?.response || null;
+    const extension = requestFileExtension(request);
+
+    if (filters.showOnlyInScope && !requestIsInScope(request)) {
+      return false;
+    }
+    if (filters.hideNoResponse && !response) {
+      return false;
+    }
+    if (filters.showOnlyParameterized && !String(request.uri || '').includes('?')) {
+      return false;
+    }
+
+    if (!response) {
+      if (!filters.status.noResponse || !statusEnabled) {
+        return false;
+      }
+    } else {
+      const statusBucket = proxyHistoryStatusBucket(response.status);
+      if (statusBucket && !filters.status[statusBucket]) {
+        return false;
+      }
+      if (!statusEnabled) {
+        return false;
+      }
+      if (!mimeEnabled) {
+        return false;
+      }
+      const mimeCategory = proxyHistoryMimeCategory(row);
+      if (mimeCategory && !filters.mime[mimeCategory]) {
+        return false;
+      }
+    }
+
+    if (filters.showOnlyExtensionsEnabled && showOnlyExt.size > 0 && !showOnlyExt.has(extension)) {
+      return false;
+    }
+    if (filters.hideExtensionsEnabled && hideExt.size > 0 && hideExt.has(extension)) {
+      return false;
+    }
+    if (hasPortFilter && requestPort(request) !== portFilter) {
+      return false;
+    }
+
+    if (!searchMatcher.matches(row)) {
+      return false;
+    }
+    return true;
+  });
+
+  if (
+    appState.proxyHistoryRows.length > 0
+    && !appState.proxyHistoryRows.some((row) => row.id === appState.selectedProxyHistoryId)
+  ) {
+    appState.selectedProxyHistoryId = appState.proxyHistoryRows[0].id;
+  }
+  if (!appState.proxyHistoryRows.length) {
+    appState.selectedProxyHistoryId = null;
+  }
+
+  renderProxyHistoryFilterSummary();
+  renderProxyHistoryList();
+  renderProxyHistoryDetail();
+
+  if (!searchMatcher.ok) {
+    setProxyHistoryFilterError(searchMatcher.error);
+  }
+}
+
+function applyProxyHistoryFiltersFromForm(closeAfterApply = false) {
+  const nextFilters = proxyHistoryReadFiltersFromForm();
+  const portText = nextFilters.listenerPort.trim();
+  if (portText.length > 0) {
+    const port = Number(portText);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setProxyHistoryFilterError('Listener port must be an integer between 1 and 65535.');
+      return false;
+    }
+  }
+  if (nextFilters.searchRegex && nextFilters.searchTerm) {
+    try {
+      const flags = nextFilters.searchCaseSensitive ? '' : 'i';
+      void new RegExp(nextFilters.searchTerm, flags);
+    } catch (err) {
+      setProxyHistoryFilterError(`Invalid regex: ${err.message}`);
+      return false;
+    }
+  }
+
+  setProxyHistoryFilterError('');
+  appState.proxyHistoryFilters = nextFilters;
+  applyProxyHistoryFilters();
+  if (closeAfterApply) {
+    closeProxyHistoryFilterPanel();
+  }
+  return true;
 }
 
 function parsePixelValue(value) {
@@ -510,6 +1236,7 @@ function renderTabs() {
 function activateTab(tabName) {
   closePluginsTopMenu();
   closeRequestContextMenu();
+  closeProxyHistoryFilterPanel();
   const tabs = Array.from(document.querySelectorAll('.tab'));
   const panels = Array.from(document.querySelectorAll('.panel'));
   for (const t of tabs) t.classList.remove('active');
@@ -656,6 +1383,9 @@ function activateProxySubtab(tabName) {
   if (selectedTab) selectedTab.classList.add('active');
   const selectedPanel = qs(`proxy-subpanel-${tabName}`);
   if (selectedPanel) selectedPanel.classList.add('active');
+  if (tabName !== 'history') {
+    closeProxyHistoryFilterPanel();
+  }
   syncResizableSplits();
 }
 
@@ -1126,7 +1856,11 @@ function renderProxyHistoryList() {
   root.innerHTML = '';
 
   if (!appState.proxyHistoryRows.length) {
-    root.innerHTML = '<div class="scroll-item">No captured requests yet.</div>';
+    if (appState.proxyHistoryAllRows.length > 0) {
+      root.innerHTML = '<div class="scroll-item">No requests match the current filters.</div>';
+    } else {
+      root.innerHTML = '<div class="scroll-item">No captured requests yet.</div>';
+    }
     return;
   }
 
@@ -1362,7 +2096,9 @@ function renderScopeHosts(hosts) {
 async function loadScope() {
   try {
     const data = await api('/target/scope');
-    renderScopeHosts(data.hosts || []);
+    appState.scopeHosts = Array.isArray(data.hosts) ? data.hosts : [];
+    renderScopeHosts(appState.scopeHosts);
+    applyProxyHistoryFilters();
   } catch (err) {
     toast(`Scope load failed: ${err.message}`);
   }
@@ -1391,18 +2127,8 @@ async function loadHistory(query = '') {
 async function loadProxyHistory() {
   try {
     const rows = await api('/history/recent?limit=300');
-    appState.proxyHistoryRows = Array.isArray(rows) ? rows : [];
-    if (
-      appState.proxyHistoryRows.length > 0
-      && !appState.proxyHistoryRows.some((row) => row.id === appState.selectedProxyHistoryId)
-    ) {
-      appState.selectedProxyHistoryId = appState.proxyHistoryRows[0].id;
-    }
-    if (!appState.proxyHistoryRows.length) {
-      appState.selectedProxyHistoryId = null;
-    }
-    renderProxyHistoryList();
-    renderProxyHistoryDetail();
+    appState.proxyHistoryAllRows = Array.isArray(rows) ? rows : [];
+    applyProxyHistoryFilters();
   } catch (err) {
     toast(`Proxy history load failed: ${err.message}`);
   }
@@ -1709,17 +2435,15 @@ function applyExchangeEvent(exchange) {
     id: exchange.request.id,
     exchange,
   };
-  appState.proxyHistoryRows = [
+  appState.proxyHistoryAllRows = [
     row,
-    ...appState.proxyHistoryRows.filter((existing) => existing.id !== row.id),
+    ...appState.proxyHistoryAllRows.filter((existing) => existing.id !== row.id),
   ].slice(0, 300);
 
   if (!appState.selectedProxyHistoryId) {
     appState.selectedProxyHistoryId = row.id;
   }
-
-  renderProxyHistoryList();
-  renderProxyHistoryDetail();
+  applyProxyHistoryFilters();
 }
 
 function wsUrlForCurrentPage() {
@@ -1758,7 +2482,9 @@ function handleRealtimeEvent(message) {
       break;
     case 'scope_updated':
       if (event.payload && Array.isArray(event.payload.hosts)) {
-        renderScopeHosts(event.payload.hosts);
+        appState.scopeHosts = event.payload.hosts;
+        renderScopeHosts(appState.scopeHosts);
+        applyProxyHistoryFilters();
       }
       break;
     case 'upstream_proxy_settings_updated':
@@ -1911,6 +2637,66 @@ function bindEvents() {
   qs('refresh-site-map').addEventListener('click', loadSiteMap);
   qs('refresh-proxy').addEventListener('click', loadInterceptQueues);
   qs('refresh-proxy-history').addEventListener('click', loadProxyHistory);
+  qs('open-proxy-history-filter').addEventListener('click', openProxyHistoryFilterPanel);
+  qs('close-proxy-history-filter').addEventListener('click', closeProxyHistoryFilterPanel);
+  qs('proxy-history-filter-backdrop').addEventListener('click', closeProxyHistoryFilterPanel);
+  qs('proxy-history-filter-show-all').addEventListener('click', () => {
+    setProxyHistoryFilterSelectionState(true);
+    setProxyHistoryFilterError('');
+  });
+  qs('proxy-history-filter-hide-all').addEventListener('click', () => {
+    setProxyHistoryFilterSelectionState(false);
+    setProxyHistoryFilterError('');
+  });
+  qs('proxy-history-filter-revert').addEventListener('click', () => {
+    proxyHistoryWriteFiltersToForm(appState.proxyHistoryFilters);
+    setProxyHistoryFilterError('');
+  });
+  qs('proxy-history-filter-apply').addEventListener('click', () => {
+    applyProxyHistoryFiltersFromForm(false);
+  });
+  qs('proxy-history-filter-apply-close').addEventListener('click', () => {
+    applyProxyHistoryFiltersFromForm(true);
+  });
+
+  for (const id of [
+    'proxy-history-filter-search-term',
+    'proxy-history-filter-show-ext',
+    'proxy-history-filter-hide-ext',
+    'proxy-history-filter-port',
+  ]) {
+    const input = qs(id);
+    if (!input) {
+      continue;
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyProxyHistoryFiltersFromForm(false);
+      }
+    });
+    input.addEventListener('input', () => setProxyHistoryFilterError(''));
+  }
+
+  for (const id of proxyHistoryFilterSelectionToggleIds) {
+    const checkbox = qs(id);
+    if (!checkbox) {
+      continue;
+    }
+    checkbox.addEventListener('change', () => setProxyHistoryFilterError(''));
+  }
+
+  for (const id of [
+    'proxy-history-filter-search-regex',
+    'proxy-history-filter-search-case',
+    'proxy-history-filter-search-negative',
+  ]) {
+    const checkbox = qs(id);
+    if (!checkbox) {
+      continue;
+    }
+    checkbox.addEventListener('change', () => setProxyHistoryFilterError(''));
+  }
 
   qs('toggle-intercept').addEventListener('change', async (e) => {
     try {
@@ -2073,6 +2859,10 @@ function bindEvents() {
 
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (proxyHistoryFilterOverlayOpen()) {
+        closeProxyHistoryFilterPanel();
+        return;
+      }
       closeRequestContextMenu();
       closePluginsTopMenu();
     }
@@ -2094,6 +2884,8 @@ async function init() {
   window.__roxySelectedPlugin = selectedPluginFromStorage();
   setProxyHistoryMode('both');
   bindEvents();
+  proxyHistoryWriteFiltersToForm(appState.proxyHistoryFilters);
+  renderProxyHistoryFilterSummary();
   syncUpstreamRandomFieldsVisibility();
   applyThemePreference();
 
