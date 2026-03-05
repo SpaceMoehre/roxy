@@ -219,6 +219,8 @@ impl ProxyEngine {
     ///
     /// Returns an error if the hyper HTTP service loop fails.
     pub async fn serve_stream(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<()> {
+        let conn_started = Instant::now();
+        debug!(%peer, "serve_stream: new client connection accepted");
         let io = TokioIo::new(stream);
         let svc_engine = self.clone();
         let service = service_fn(move |req| {
@@ -226,15 +228,22 @@ impl ProxyEngine {
             async move { request_engine.handle_request(req).await }
         });
 
-        hyper::server::conn::http1::Builder::new()
+        let result = hyper::server::conn::http1::Builder::new()
             .keep_alive(true)
             .preserve_header_case(true)
             .title_case_headers(true)
             .serve_connection(io, service)
             .with_upgrades()
             .await
-            .with_context(|| format!("failed serving client connection {peer}"))?;
+            .with_context(|| format!("failed serving client connection {peer}"));
 
+        debug!(
+            %peer,
+            elapsed_ms = conn_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "serve_stream: client connection closed"
+        );
+        result?;
         Ok(())
     }
 
@@ -242,17 +251,36 @@ impl ProxyEngine {
         self: Arc<Self>,
         request: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let req_started = Instant::now();
+        let method = request.method().clone();
+        let uri_preview = request.uri().to_string();
+        debug!(
+            method = %method,
+            uri = %uri_preview,
+            "handle_request: begin"
+        );
         let cors_origin = request.headers().get(ORIGIN).cloned();
         if request.method() == Method::CONNECT {
+            debug!(uri = %uri_preview, "handle_request: routing to CONNECT handler");
             return Ok(self.handle_connect(request));
         }
 
         match self.forward_http_request(request, "http", None).await {
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                debug!(
+                    method = %method,
+                    uri = %uri_preview,
+                    status = response.status().as_u16(),
+                    elapsed_ms = req_started.elapsed().as_millis() as u64,
+                    "handle_request: completed successfully"
+                );
+                Ok(response)
+            }
             Err(err) => {
                 error!(
                     error = %err,
                     error_chain = %format_error_chain(&err),
+                    elapsed_ms = req_started.elapsed().as_millis() as u64,
                     "proxy forwarding failed"
                 );
                 Ok(build_text_response_with_origin(
@@ -275,10 +303,24 @@ impl ProxyEngine {
         let mitm_enabled = self.state.mitm_enabled() && self.config.mitm_enabled;
         let engine = self.clone();
 
+        debug!(
+            %authority,
+            mitm_enabled,
+            "handle_connect: spawning CONNECT handler"
+        );
+
         tokio::spawn(async move {
+            let connect_started = Instant::now();
+            debug!(%authority, "handle_connect: waiting for HTTP upgrade");
             match hyper::upgrade::on(request).await {
                 Ok(upgraded) => {
+                    debug!(
+                        %authority,
+                        elapsed_ms = connect_started.elapsed().as_millis() as u64,
+                        "handle_connect: HTTP upgrade succeeded"
+                    );
                     if mitm_enabled {
+                        debug!(%authority, "handle_connect: entering MITM path");
                         if let Err(err) = engine
                             .serve_https_mitm(TokioIo::new(upgraded), authority.clone())
                             .await
@@ -287,18 +329,34 @@ impl ProxyEngine {
                                 %authority,
                                 error = %err,
                                 error_chain = %format_error_chain(&err),
+                                elapsed_ms = connect_started.elapsed().as_millis() as u64,
                                 "https mitm failed"
                             );
-                        };
-                    } else if let Err(err) = engine
-                        .tunnel_connect(TokioIo::new(upgraded), authority)
-                        .await
-                    {
-                        warn!(error = %err, error_chain = %format_error_chain(&err), "connect tunnel failed");
+                        } else {
+                            debug!(
+                                %authority,
+                                elapsed_ms = connect_started.elapsed().as_millis() as u64,
+                                "handle_connect: MITM session ended normally"
+                            );
+                        }
+                    } else {
+                        debug!(%authority, "handle_connect: entering tunnel (passthrough) path");
+                        if let Err(err) = engine
+                            .tunnel_connect(TokioIo::new(upgraded), authority.clone())
+                            .await
+                        {
+                            warn!(error = %err, error_chain = %format_error_chain(&err), "connect tunnel failed");
+                        } else {
+                            debug!(
+                                %authority,
+                                elapsed_ms = connect_started.elapsed().as_millis() as u64,
+                                "handle_connect: tunnel session ended normally"
+                            );
+                        }
                     }
                 }
                 Err(err) => {
-                    warn!(%err, "failed to upgrade CONNECT request");
+                    warn!(%err, %authority, "failed to upgrade CONNECT request");
                 }
             }
         });
@@ -313,15 +371,29 @@ impl ProxyEngine {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        let tunnel_started = Instant::now();
+        debug!(%authority, "tunnel_connect: connecting to upstream");
         let mut upstream = self
             .connect_for_connect_tunnel(&authority)
             .await
             .with_context(|| {
                 format!("failed connecting tunnel target via upstream chain: {authority}")
             })?;
-        let _ = copy_bidirectional(&mut upgraded, &mut upstream)
+        debug!(
+            %authority,
+            elapsed_ms = tunnel_started.elapsed().as_millis() as u64,
+            "tunnel_connect: upstream connected, starting bidirectional copy"
+        );
+        let result = copy_bidirectional(&mut upgraded, &mut upstream)
             .await
-            .context("CONNECT bidirectional copy failed")?;
+            .context("CONNECT bidirectional copy failed");
+        debug!(
+            %authority,
+            elapsed_ms = tunnel_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "tunnel_connect: bidirectional copy finished"
+        );
+        let _ = result?;
         Ok(())
     }
 
@@ -329,22 +401,35 @@ impl ProxyEngine {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let mitm_started = Instant::now();
         let domain = authority
             .split(':')
             .next()
             .ok_or_else(|| anyhow!("invalid CONNECT authority"))?;
 
+        debug!(%authority, %domain, "serve_https_mitm: generating leaf certificate");
         let leaf = self
             .cert_manager
             .get_or_create_domain_cert(domain)
             .await
             .with_context(|| format!("failed creating domain certificate for {domain}"))?;
+        debug!(
+            %authority,
+            elapsed_ms = mitm_started.elapsed().as_millis() as u64,
+            "serve_https_mitm: leaf cert ready, starting TLS handshake with client"
+        );
 
         let acceptor = build_downstream_mitm_acceptor(&leaf.cert_der, &leaf.key_der)?;
         let tls_stream = tls_accept(&acceptor, upgraded)
             .await
             .map_err(|err| anyhow!("TLS handshake with downstream client failed: {err}"))?;
+        debug!(
+            %authority,
+            elapsed_ms = mitm_started.elapsed().as_millis() as u64,
+            "serve_https_mitm: TLS handshake with client succeeded"
+        );
 
+        let authority_for_log = authority.clone();
         let authority = Arc::new(authority);
         let engine = Arc::new(self.clone());
         let service = service_fn(move |req| {
@@ -374,11 +459,22 @@ impl ProxyEngine {
             }
         });
 
-        hyper::server::conn::http1::Builder::new()
+        debug!(
+            authority = %authority_for_log,
+            "serve_https_mitm: starting HTTP/1.1 service loop over decrypted TLS stream"
+        );
+        let result = hyper::server::conn::http1::Builder::new()
             .keep_alive(true)
             .serve_connection(TokioIo::new(tls_stream), service)
             .await
-            .context("failed serving mitm TLS http connection")?;
+            .context("failed serving mitm TLS http connection");
+        debug!(
+            authority = %authority_for_log,
+            elapsed_ms = mitm_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "serve_https_mitm: HTTP service loop ended"
+        );
+        result?;
 
         Ok(())
     }
@@ -399,6 +495,13 @@ impl ProxyEngine {
         request_id: Uuid,
         parsed_request: &crate::raw_http::ParsedRequestBlob,
     ) -> Result<(StatusCode, http::HeaderMap, Bytes)> {
+        let upstream_started = Instant::now();
+        debug!(
+            %request_id,
+            method = %parsed_request.method,
+            uri = %parsed_request.uri,
+            "forward_upstream_request: begin"
+        );
         let timeout = self.config.request_timeout;
         tokio::time::timeout(timeout, async {
             let uri = parsed_request
@@ -446,7 +549,19 @@ impl ProxyEngine {
                 }
             }
 
+            debug!(
+                request_id = %request_id,
+                %authority,
+                elapsed_ms = upstream_started.elapsed().as_millis() as u64,
+                "forward_upstream_request: dialing upstream via chain"
+            );
             let stream = dial_via_upstream_chain(&authority, &chain, settings.proxy_dns).await?;
+            debug!(
+                request_id = %request_id,
+                %authority,
+                elapsed_ms = upstream_started.elapsed().as_millis() as u64,
+                "forward_upstream_request: TCP connection established"
+            );
             if scheme == "https" {
                 let host = uri
                     .host()
@@ -504,7 +619,13 @@ impl ProxyEngine {
                     %host,
                     ech_accepted = tls_stream.ssl().ech_accepted(),
                     selected_alpn = ?tls_stream.ssl().selected_alpn_protocol(),
-                    "upstream TLS handshake completed"
+                    elapsed_ms = upstream_started.elapsed().as_millis() as u64,
+                    "forward_upstream_request: upstream TLS handshake completed"
+                );
+                debug!(
+                    request_id = %request_id,
+                    use_h2,
+                    "forward_upstream_request: sending HTTP request over TLS stream"
                 );
                 let h2_result = send_http_request_over_stream(
                     tls_stream,
@@ -559,7 +680,18 @@ impl ProxyEngine {
                 return h2_result;
             }
 
-            send_http_request_over_stream(stream, parsed_request, &uri, &authority, false).await
+            debug!(
+                request_id = %request_id,
+                "forward_upstream_request: sending HTTP request over plain TCP stream"
+            );
+            let plain_result = send_http_request_over_stream(stream, parsed_request, &uri, &authority, false).await;
+            debug!(
+                request_id = %request_id,
+                elapsed_ms = upstream_started.elapsed().as_millis() as u64,
+                success = plain_result.is_ok(),
+                "forward_upstream_request: plain HTTP request completed"
+            );
+            plain_result
         })
         .await
         .with_context(|| {
@@ -581,11 +713,24 @@ impl ProxyEngine {
 
         let (parts, body) = request.into_parts();
         let cors_origin = parts.headers.get(ORIGIN).cloned();
+        debug!(
+            %request_id,
+            method = %parts.method,
+            uri = %parts.uri,
+            authority_hint = ?authority_hint,
+            "forward_http_request: reading request body"
+        );
         let raw_body = body
             .collect()
             .await
             .context("failed reading request body")?
             .to_bytes();
+        debug!(
+            %request_id,
+            body_bytes = raw_body.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "forward_http_request: request body read complete"
+        );
         let request_target = request_target_for_blob(&parts);
         let effective_uri = build_effective_uri(&parts, default_scheme, authority_hint)?;
         let host = extract_host(&parts, authority_hint);
@@ -610,6 +755,11 @@ impl ProxyEngine {
         self.log_request_snapshot("captured", &captured_request);
 
         if let Some(middleware) = &self.middleware {
+            debug!(
+                %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "forward_http_request: invoking request middleware"
+            );
             match middleware
                 .on_request_pre_capture(captured_request.clone())
                 .await
@@ -620,6 +770,11 @@ impl ProxyEngine {
                         mutated.created_at_unix_ms = captured_request.created_at_unix_ms;
                     }
                     captured_request = mutated;
+                    debug!(
+                        %request_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "forward_http_request: request middleware completed"
+                    );
                     self.log_request_snapshot("middleware-mutated", &captured_request);
                 }
                 Err(err) => {
@@ -629,6 +784,12 @@ impl ProxyEngine {
         }
 
         if self.state.intercept_enabled() {
+            debug!(
+                %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                pending_intercepts = self.state.pending_requests().len(),
+                "forward_http_request: request interception enabled; enqueuing and awaiting decision"
+            );
             self.log_debug(
                 request_id,
                 "request interception is enabled; waiting for interceptor decision",
@@ -684,6 +845,11 @@ impl ProxyEngine {
         self.state
             .register_site_path(captured_request.host.clone(), parsed_path);
 
+        debug!(
+            %request_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "forward_http_request: sending request upstream"
+        );
         let (status, headers, encoded_response_body) = self
             .forward_upstream_request(request_id, &parsed_request)
             .await
@@ -693,6 +859,13 @@ impl ProxyEngine {
                     parsed_request.method, parsed_request.uri
                 )
             })?;
+        debug!(
+            %request_id,
+            status = status.as_u16(),
+            response_body_bytes = encoded_response_body.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "forward_http_request: upstream response received"
+        );
         let content_encoding = content_encoding_from_headers(&headers);
         let mut response_decoded = false;
         let response_body = match decode_http_body_bytes(
@@ -739,6 +912,11 @@ impl ProxyEngine {
         self.log_response_snapshot("upstream", &captured_response);
 
         if let Some(middleware) = &self.middleware {
+            debug!(
+                %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "forward_http_request: invoking response middleware"
+            );
             match middleware
                 .on_response_pre_capture(&captured_request, captured_response.clone())
                 .await
@@ -749,6 +927,11 @@ impl ProxyEngine {
                         mutated.created_at_unix_ms = captured_response.created_at_unix_ms;
                     }
                     captured_response = mutated;
+                    debug!(
+                        %request_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "forward_http_request: response middleware completed"
+                    );
                     self.log_response_snapshot("middleware-mutated", &captured_response);
                 }
                 Err(err) => {
@@ -758,6 +941,12 @@ impl ProxyEngine {
         }
 
         if self.state.intercept_response_enabled() {
+            debug!(
+                %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                pending_response_intercepts = self.state.pending_responses().len(),
+                "forward_http_request: response interception enabled; enqueuing and awaiting decision"
+            );
             self.log_debug(
                 request_id,
                 "response interception is enabled; waiting for interceptor decision",
@@ -808,7 +997,18 @@ impl ProxyEngine {
         };
 
         if let Err(err) = self.event_tx.try_send(EventEnvelope::Exchange(exchange)) {
-            debug!(%err, "storage event queue is full; dropping event");
+            warn!(
+                %request_id,
+                %err,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "storage event queue is full; dropping event — this may cause missing packets in the UI"
+            );
+        } else {
+            debug!(
+                %request_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "forward_http_request: exchange sent to event pipeline"
+            );
         }
 
         let status = StatusCode::from_u16(captured_response.status)
@@ -963,20 +1163,47 @@ async fn dial_via_upstream_chain(
     proxy_dns: bool,
 ) -> Result<TcpStream> {
     if chain.is_empty() {
+        debug!(%authority, "dial_via_upstream_chain: connecting directly (no proxy chain)");
         return connect_direct_authority(authority).await;
     }
 
     let final_targets = if proxy_dns {
+        debug!(%authority, "dial_via_upstream_chain: proxy_dns enabled, deferring DNS to proxy");
         vec![authority.to_string()]
     } else {
+        debug!(%authority, "dial_via_upstream_chain: resolving authority locally");
         resolve_authority_candidates(authority).await?
     };
+    debug!(
+        %authority,
+        target_count = final_targets.len(),
+        "dial_via_upstream_chain: resolved targets, attempting chain dial"
+    );
 
     let mut last_err: Option<anyhow::Error> = None;
-    for final_target in final_targets {
-        match dial_chain_once(chain, &final_target).await {
-            Ok(stream) => return Ok(stream),
+    for (idx, final_target) in final_targets.iter().enumerate() {
+        debug!(
+            %authority,
+            target_index = idx,
+            target = %final_target,
+            "dial_via_upstream_chain: attempting chain to target"
+        );
+        match dial_chain_once(chain, final_target).await {
+            Ok(stream) => {
+                debug!(
+                    %authority,
+                    target = %final_target,
+                    "dial_via_upstream_chain: chain connected successfully"
+                );
+                return Ok(stream);
+            }
             Err(err) => {
+                debug!(
+                    %authority,
+                    target = %final_target,
+                    error = %err,
+                    "dial_via_upstream_chain: chain dial attempt failed"
+                );
                 last_err = Some(err.context(format!(
                     "failed dialing upstream chain to resolved target {final_target}"
                 )));
@@ -1105,11 +1332,18 @@ where
     }
 
     if use_h2 {
+        debug!(%authority, "send_http_request_over_stream: starting HTTP/2 handshake");
+        let h2_started = Instant::now();
         let (mut sender, connection) =
             hyper::client::conn::http2::Builder::new(TokioExecutor::new())
                 .handshake(TokioIo::new(stream))
                 .await
                 .context("failed opening upstream HTTP/2 client connection")?;
+        debug!(
+            %authority,
+            elapsed_ms = h2_started.elapsed().as_millis() as u64,
+            "send_http_request_over_stream: HTTP/2 handshake complete, sending request"
+        );
         tokio::spawn(async move {
             if let Err(err) = connection.await {
                 trace!(%err, "upstream HTTP/2 client connection closed with error");
@@ -1122,18 +1356,37 @@ where
             .context("failed sending HTTP/2 request to upstream")?;
         let status = response.status();
         let headers = response.headers().clone();
+        debug!(
+            %authority,
+            status = status.as_u16(),
+            elapsed_ms = h2_started.elapsed().as_millis() as u64,
+            "send_http_request_over_stream: HTTP/2 response headers received, reading body"
+        );
         let body = response
             .into_body()
             .collect()
             .await
             .context("failed reading upstream HTTP/2 response body")?
             .to_bytes();
+        debug!(
+            %authority,
+            body_bytes = body.len(),
+            elapsed_ms = h2_started.elapsed().as_millis() as u64,
+            "send_http_request_over_stream: HTTP/2 response complete"
+        );
         return Ok((status, headers, body));
     }
 
+    debug!(%authority, "send_http_request_over_stream: starting HTTP/1.1 handshake");
+    let h1_started = Instant::now();
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .context("failed opening upstream HTTP/1.1 client connection")?;
+    debug!(
+        %authority,
+        elapsed_ms = h1_started.elapsed().as_millis() as u64,
+        "send_http_request_over_stream: HTTP/1.1 handshake complete, sending request"
+    );
     tokio::spawn(async move {
         if let Err(err) = connection.await {
             trace!(%err, "upstream client connection closed with error");
@@ -1146,12 +1399,24 @@ where
         .context("failed sending request to upstream")?;
     let status = response.status();
     let headers = response.headers().clone();
+    debug!(
+        %authority,
+        status = status.as_u16(),
+        elapsed_ms = h1_started.elapsed().as_millis() as u64,
+        "send_http_request_over_stream: HTTP/1.1 response headers received, reading body"
+    );
     let body = response
         .into_body()
         .collect()
         .await
         .context("failed reading upstream response body")?
         .to_bytes();
+    debug!(
+        %authority,
+        body_bytes = body.len(),
+        elapsed_ms = h1_started.elapsed().as_millis() as u64,
+        "send_http_request_over_stream: HTTP/1.1 response complete"
+    );
     Ok((status, headers, body))
 }
 
@@ -1188,19 +1453,50 @@ fn authority_resolution_cache() -> &'static DashMap<String, AuthorityResolveCach
 }
 
 async fn connect_direct_authority(authority: &str) -> Result<TcpStream> {
+    debug!(%authority, "connect_direct_authority: resolving candidates");
     let targets = resolve_authority_candidates(authority).await?;
+    debug!(
+        %authority,
+        target_count = targets.len(),
+        "connect_direct_authority: resolved, attempting connections"
+    );
     let mut last_err: Option<anyhow::Error> = None;
-    for target in targets {
-        match tokio::time::timeout(DIRECT_CONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(&target))
+    for (idx, target) in targets.iter().enumerate() {
+        debug!(
+            %authority,
+            target_index = idx,
+            target = %target,
+            "connect_direct_authority: attempting TCP connect"
+        );
+        match tokio::time::timeout(DIRECT_CONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(&*target))
             .await
         {
-            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Ok(stream)) => {
+                debug!(
+                    %authority,
+                    target = %target,
+                    "connect_direct_authority: connected successfully"
+                );
+                return Ok(stream);
+            }
             Ok(Err(err)) => {
+                debug!(
+                    %authority,
+                    target = %target,
+                    error = %err,
+                    "connect_direct_authority: TCP connect failed"
+                );
                 last_err = Some(
                     anyhow!(err).context(format!("failed connecting to upstream target {target}")),
                 );
             }
             Err(_) => {
+                debug!(
+                    %authority,
+                    target = %target,
+                    timeout_ms = DIRECT_CONNECT_ATTEMPT_TIMEOUT.as_millis() as u64,
+                    "connect_direct_authority: TCP connect timed out"
+                );
                 last_err = Some(anyhow!(
                     "timed out connecting to upstream target {target} after {:?}",
                     DIRECT_CONNECT_ATTEMPT_TIMEOUT
@@ -1212,12 +1508,46 @@ async fn connect_direct_authority(authority: &str) -> Result<TcpStream> {
 }
 
 async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
+    let resolve_started = Instant::now();
     let cache_key = authority.to_string();
     let now = Instant::now();
-    if let Some(entry) = authority_resolution_cache().get(&cache_key) {
-        if entry.expires_at > now {
-            return Ok(entry.targets.clone());
+
+    // Check cache — the `.get()` call returns a `Ref` guard that holds a
+    // **read lock** on the DashMap shard. We must drop that guard before
+    // calling `.remove()` (which needs a write lock), otherwise we deadlock.
+    let cache_state = {
+        let entry = authority_resolution_cache().get(&cache_key);
+        match &entry {
+            Some(e) if e.expires_at > now => {
+                debug!(
+                    %authority,
+                    targets = e.targets.len(),
+                    "resolve_authority_candidates: cache hit"
+                );
+                return Ok(e.targets.clone());
+            }
+            Some(_) => {
+                debug!(
+                    %authority,
+                    "resolve_authority_candidates: cache expired"
+                );
+                true // expired — needs removal
+            }
+            None => {
+                debug!(
+                    %authority,
+                    "resolve_authority_candidates: cache miss"
+                );
+                false
+            }
         }
+    }; // <-- Ref guard dropped here, read lock released
+
+    if cache_state {
+        debug!(
+            %authority,
+            "resolve_authority_candidates: removing stale cache entry"
+        );
         authority_resolution_cache().remove(&cache_key);
     }
 
@@ -1226,10 +1556,39 @@ async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
         .with_context(|| format!("invalid authority '{authority}'"))?;
     let host = authority.host();
     let port = authority.port_u16().unwrap_or(443);
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .with_context(|| format!("dns lookup failed for {host}:{port}"))?;
+    debug!(
+        %host,
+        port,
+        "resolve_authority_candidates: starting DNS lookup"
+    );
+    let dns_started = Instant::now();
+    let resolved = match tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    {
+        Ok(result) => result.with_context(|| format!("dns lookup failed for {host}:{port}"))?,
+        Err(_) => {
+            warn!(
+                %host,
+                port,
+                elapsed_ms = dns_started.elapsed().as_millis() as u64,
+                "resolve_authority_candidates: DNS lookup timed out after 10s"
+            );
+            return Err(anyhow!(
+                "dns lookup timed out after 10s for {host}:{port}"
+            ));
+        }
+    };
     let mut addrs: Vec<SocketAddr> = resolved.collect();
+    debug!(
+        %host,
+        port,
+        addr_count = addrs.len(),
+        elapsed_ms = dns_started.elapsed().as_millis() as u64,
+        "resolve_authority_candidates: DNS lookup completed"
+    );
     if addrs.is_empty() {
         return Err(anyhow!("dns lookup returned no records for {host}:{port}"));
     }
@@ -1238,6 +1597,12 @@ async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
         .into_iter()
         .map(|addr| format_authority(&addr.ip().to_string(), port))
         .collect::<Vec<_>>();
+    debug!(
+        cache_key = %cache_key,
+        targets = ?targets,
+        total_elapsed_ms = resolve_started.elapsed().as_millis() as u64,
+        "resolve_authority_candidates: caching resolved targets"
+    );
     authority_resolution_cache().insert(
         cache_key,
         AuthorityResolveCacheEntry {

@@ -295,12 +295,25 @@ async fn main() -> Result<()> {
     let app_state_for_plugins = app_state.clone();
     let ui_modules_for_plugins = ui_modules.clone();
     let event_dispatch = tokio::spawn(async move {
+        let mut event_count: u64 = 0;
         while let Some(event) = event_rx.recv().await {
+            event_count += 1;
             let EventEnvelope::Exchange(exchange) = &event;
+            let exchange_request_id = exchange.request.id;
+            debug!(
+                request_id = %exchange_request_id,
+                event_count,
+                "event_dispatch: received exchange from proxy engine"
+            );
             if let Err(err) = storage_tx.send(exchange.clone()).await {
-                error!(%err, "storage ingestion channel closed");
+                error!(
+                    %err,
+                    request_id = %exchange_request_id,
+                    "storage ingestion channel closed"
+                );
             }
 
+            let dispatch_started = std::time::Instant::now();
             let payload = serde_json::to_value(exchange).unwrap_or(serde_json::Value::Null);
             let plugin_results = plugins_for_loop
                 .invoke_all("on_exchange", payload, Duration::from_millis(200))
@@ -316,8 +329,15 @@ async fn main() -> Result<()> {
                 }
             }
 
+            debug!(
+                request_id = %exchange_request_id,
+                plugin_ms = dispatch_started.elapsed().as_millis() as u64,
+                ws_clients = ws_hub_for_loop.client_count(),
+                "event_dispatch: publishing exchange to WebSocket hub"
+            );
             ws_hub_for_loop.publish(&event);
         }
+        debug!(total_events = event_count, "event_dispatch: channel closed, exiting");
     });
 
     let mut intruder_events = intruder.subscribe_events();
@@ -593,13 +613,28 @@ async fn route_ingress_stream(
     peer: SocketAddr,
     targets: IngressTargets,
 ) -> Result<()> {
+    let route_started = std::time::Instant::now();
+    debug!(%peer, "ingress: detecting route");
     let route = detect_ingress_route(&stream).await;
-    debug!(%peer, ?route, "ingress route selected");
-    match route {
+    debug!(
+        %peer,
+        ?route,
+        detect_ms = route_started.elapsed().as_millis() as u64,
+        "ingress route selected"
+    );
+    let result = match route {
         IngressRoute::Proxy => targets.proxy.serve_stream(stream, peer).await,
         IngressRoute::Api => tunnel_to_uds(stream, &targets.api_uds).await,
         IngressRoute::WebSocket => tunnel_to_uds(stream, &targets.ws_uds).await,
-    }
+    };
+    debug!(
+        %peer,
+        ?route,
+        elapsed_ms = route_started.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        "ingress: stream handling completed"
+    );
+    result
 }
 
 async fn tunnel_to_uds(mut stream: TcpStream, path: &Path) -> Result<()> {

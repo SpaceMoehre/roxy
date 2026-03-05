@@ -24,7 +24,7 @@ use tantivy::{
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, interval};
-use tracing::{error, warn};
+use tracing::warn;
 use uuid::Uuid;
 
 /// A single search result pairing a UUID with the full exchange.
@@ -126,6 +126,8 @@ impl StorageManager {
             let mut dirty = false;
             let mut tick = interval(Duration::from_secs(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ingested_count: u64 = 0;
+            let mut pending_commit: u64 = 0;
 
             loop {
                 tokio::select! {
@@ -134,17 +136,35 @@ impl StorageManager {
                     maybe = rx.recv() => {
                         match maybe {
                             Some(exchange) => {
+                                let request_id = exchange.request.id;
                                 if let Err(err) = manager.index_exchange(&exchange).await {
-                                    error!(%err, "failed persisting exchange");
+                                    tracing::error!(
+                                        %err,
+                                        %request_id,
+                                        "failed persisting exchange"
+                                    );
                                 } else {
+                                    ingested_count += 1;
+                                    pending_commit += 1;
                                     dirty = true;
+                                    tracing::debug!(
+                                        %request_id,
+                                        ingested_count,
+                                        pending_commit,
+                                        "storage: exchange indexed (pending commit)"
+                                    );
                                 }
                             }
                             None => {
                                 // Channel closed — final commit & exit.
+                                tracing::debug!(
+                                    ingested_count,
+                                    pending_commit,
+                                    "storage: ingestor channel closed, performing final commit"
+                                );
                                 if dirty {
                                     if let Err(err) = manager.commit_pending().await {
-                                        error!(%err, "final storage commit failed");
+                                        tracing::error!(%err, "final storage commit failed");
                                     }
                                 }
                                 break;
@@ -154,9 +174,20 @@ impl StorageManager {
 
                     _ = tick.tick() => {
                         if dirty {
+                            tracing::debug!(
+                                pending_commit,
+                                ingested_count,
+                                "storage: periodic commit starting"
+                            );
                             if let Err(err) = manager.commit_pending().await {
-                                error!(%err, "periodic storage commit failed");
+                                tracing::error!(%err, "periodic storage commit failed");
+                            } else {
+                                tracing::debug!(
+                                    committed = pending_commit,
+                                    "storage: periodic commit succeeded"
+                                );
                             }
+                            pending_commit = 0;
                             dirty = false;
                         }
                     }
