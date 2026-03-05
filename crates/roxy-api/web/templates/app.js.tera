@@ -22,6 +22,8 @@ const appState = {
   wsReconnectTimer: null,
   toastTimer: null,
   settings: loadUiSettings(),
+  wsHistoryRows: [],
+  selectedWsMessageId: null,
 };
 
 const proxyHistoryFilterSelectionToggleIds = [
@@ -2408,6 +2410,89 @@ function applyExchangeEvent(exchange) {
   applyProxyHistoryFilters();
 }
 
+// ── WebSocket History ────────────────────────────────────────────────
+
+function applyWsMessageEvent(msg) {
+  if (!msg || !msg.id) return;
+  const row = { id: msg.id, msg };
+  appState.wsHistoryRows = [row, ...appState.wsHistoryRows].slice(0, 500);
+  renderWsHistory();
+}
+
+function renderWsHistory() {
+  const list = qs('ws-history-list');
+  if (!list) return;
+  const rows = appState.wsHistoryRows;
+  const meta = qs('ws-history-meta');
+  if (meta) {
+    meta.textContent = rows.length > 0
+      ? `${rows.length} message${rows.length !== 1 ? 's' : ''}`
+      : 'No WebSocket messages captured';
+  }
+  list.innerHTML = rows.map((row) => {
+    const m = row.msg;
+    const dir = m.direction === 'client_to_server' ? '\u2191' : '\u2193';
+    const dirClass = m.direction === 'client_to_server' ? 'ws-dir-up' : 'ws-dir-down';
+    const sel = row.id === appState.selectedWsMessageId ? ' active' : '';
+    const preview = m.payload_text
+      ? m.payload_text.slice(0, 120)
+      : `[${m.opcode} ${m.payload_length}B]`;
+    const ts = new Date(m.timestamp_ms).toLocaleTimeString();
+    return `<div class="scroll-item ws-row${sel}" data-ws-id="${row.id}">
+      <span class="ws-dir ${dirClass}">${dir}</span>
+      <span class="ws-host">${escapeHtml(m.host)}</span>
+      <span class="ws-opcode">${m.opcode}</span>
+      <span class="ws-preview">${escapeHtml(preview)}</span>
+      <span class="ws-time">${ts}</span>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.ws-row').forEach((el) => {
+    el.addEventListener('click', () => {
+      selectWsMessage(el.dataset.wsId);
+    });
+  });
+}
+
+function selectWsMessage(id) {
+  appState.selectedWsMessageId = id;
+  const row = appState.wsHistoryRows.find((r) => r.id === id);
+  const emptyEl = qs('ws-history-empty');
+  const detailEl = qs('ws-history-detail');
+  const metaEl = qs('ws-detail-meta');
+  const payloadEl = qs('ws-detail-payload');
+
+  if (!row || !detailEl) {
+    if (emptyEl) emptyEl.style.display = '';
+    if (detailEl) detailEl.style.display = 'none';
+    renderWsHistory();
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+  detailEl.style.display = '';
+
+  const m = row.msg;
+  const dir = m.direction === 'client_to_server' ? 'Client \u2192 Server' : 'Server \u2192 Client';
+  const ts = new Date(m.timestamp_ms).toLocaleString();
+  if (metaEl) {
+    metaEl.textContent = `${dir}  \u2022  ${m.opcode}  \u2022  ${m.payload_length} bytes  \u2022  ${m.host}${m.uri ? m.uri.replace(/^https?:\/\/[^/]+/, '') : ''}  \u2022  ${ts}`;
+  }
+  if (payloadEl) {
+    payloadEl.textContent = m.payload_text || `[binary ${m.payload_length} bytes]`;
+  }
+  renderWsHistory();
+}
+
+function clearWsHistory() {
+  appState.wsHistoryRows = [];
+  appState.selectedWsMessageId = null;
+  renderWsHistory();
+  const emptyEl = qs('ws-history-empty');
+  const detailEl = qs('ws-history-detail');
+  if (emptyEl) emptyEl.style.display = '';
+  if (detailEl) detailEl.style.display = 'none';
+}
+
 function wsUrlForCurrentPage() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${window.location.host}/ws`;
@@ -2451,6 +2536,9 @@ function handleRealtimeEvent(message) {
       break;
     case 'upstream_proxy_settings_updated':
       applyUpstreamSettingsSnapshot(event.payload);
+      break;
+    case 'wsmessage':
+      applyWsMessageEvent(event.payload);
       break;
     default:
       break;
@@ -2599,6 +2687,9 @@ function bindEvents() {
   qs('refresh-site-map').addEventListener('click', loadSiteMap);
   qs('refresh-proxy').addEventListener('click', loadInterceptQueues);
   qs('refresh-proxy-history').addEventListener('click', loadProxyHistory);
+  if (qs('clear-ws-history')) {
+    qs('clear-ws-history').addEventListener('click', clearWsHistory);
+  }
   qs('open-proxy-history-filter').addEventListener('click', openProxyHistoryFilterPanel);
   qs('close-proxy-history-filter').addEventListener('click', closeProxyHistoryFilterPanel);
   qs('proxy-history-filter-backdrop').addEventListener('click', closeProxyHistoryFilterPanel);

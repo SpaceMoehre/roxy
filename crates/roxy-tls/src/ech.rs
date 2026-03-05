@@ -102,8 +102,25 @@ pub async fn apply_ech_client_config(ssl: &mut SslRef, host: &str, config_overri
 /// Returns `Some(EchRetry)` when the server indicates ECH should be
 /// retried with updated configs, or `None` if the error is unrelated
 /// to ECH.
+///
+/// **Safety note**: BoringSSL's `SSL_get0_ech_retry_configs` calls
+/// `assert(0)` when invoked on a handshake that did not fail with
+/// `SSL_R_ECH_REJECTED`.  The `tokio-boring` wrapper does not expose
+/// the SSL reason code directly, so we guard the call by checking the
+/// formatted error string for the `ECH_REJECTED` reason before
+/// attempting to extract retry configs.
 pub fn ech_retry_from_handshake_error<S>(err: &HandshakeError<S>) -> Option<EchRetry> {
     let ssl = err.ssl()?;
+
+    // Only proceed when the handshake error is specifically an
+    // authenticated ECH rejection.  Calling get_ech_retry_configs()
+    // in any other state aborts the process via assert(0) inside
+    // BoringSSL (encrypted_client_hello.cc).
+    let err_msg = err.to_string();
+    if !err_msg.contains("ECH_REJECTED") {
+        return None;
+    }
+
     let config_list = ssl.get_ech_retry_configs()?.to_vec();
     let public_name_override = ssl
         .get_ech_name_override()

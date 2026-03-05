@@ -123,6 +123,60 @@ pub struct ResponseMutation {
     pub body: Option<Bytes>,
 }
 
+/// Direction of a WebSocket message relative to the proxy.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WsDirection {
+    /// Message sent from the client (browser) to the upstream server.
+    ClientToServer,
+    /// Message sent from the upstream server to the client (browser).
+    ServerToClient,
+}
+
+/// WebSocket frame opcode.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WsOpcode {
+    /// UTF-8 text frame.
+    Text,
+    /// Binary data frame.
+    Binary,
+    /// Ping control frame.
+    Ping,
+    /// Pong control frame.
+    Pong,
+    /// Connection close control frame.
+    Close,
+}
+
+/// A single captured WebSocket message flowing through the proxy.
+///
+/// Each message belongs to a logical WebSocket connection identified by
+/// [`connection_id`](CapturedWsMessage::connection_id).  Text payloads are
+/// stored in [`payload_text`](CapturedWsMessage::payload_text); binary
+/// payloads only record their length.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapturedWsMessage {
+    /// Unique message identifier.
+    pub id: RequestId,
+    /// Identifier grouping all messages from the same WebSocket connection.
+    pub connection_id: RequestId,
+    /// Wall-clock timestamp (milliseconds since Unix epoch).
+    pub timestamp_ms: u128,
+    /// Whether this message was sent client→server or server→client.
+    pub direction: WsDirection,
+    /// Frame opcode.
+    pub opcode: WsOpcode,
+    /// Decoded text payload for text frames; `None` for binary frames.
+    pub payload_text: Option<String>,
+    /// Byte length of the payload.
+    pub payload_length: usize,
+    /// Target hostname of the WebSocket connection.
+    pub host: String,
+    /// Full URI of the WebSocket endpoint.
+    pub uri: String,
+}
+
 /// Envelope pushed through the event pipeline and broadcast over WebSocket.
 ///
 /// Tagged with `#[serde(tag = "event", content = "payload")]` so each variant
@@ -132,6 +186,8 @@ pub struct ResponseMutation {
 pub enum EventEnvelope {
     /// A completed (or failed) HTTP exchange.
     Exchange(CapturedExchange),
+    /// A single WebSocket message captured from a proxied connection.
+    WsMessage(CapturedWsMessage),
 }
 
 /// Converts an [`http::HeaderMap`] into a `Vec<HeaderValuePair>`, discarding

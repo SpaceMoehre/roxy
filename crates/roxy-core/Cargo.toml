@@ -20,12 +20,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-boring.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 brotli.workspace = true
 flate2.workspace = true
 zstd.workspace = true
+futures-util = "0.3"
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

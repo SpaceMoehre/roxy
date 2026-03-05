@@ -1178,3 +1178,63 @@ select:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+/* ── WebSocket History ────────────────────────────────────────────── */
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ws-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ws-dir {
+  flex-shrink: 0;
+  font-weight: 700;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+}
+.ws-dir-up { color: var(--accent); }
+.ws-dir-down { color: var(--warning, #e4a531); }
+.ws-host {
+  flex-shrink: 0;
+  font-weight: 600;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-opcode {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.ws-preview {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 11px;
+  opacity: 0.8;
+}
+.ws-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
+  margin-left: auto;
+}
+.ws-detail-meta {
+  padding: 6px 8px;
+  font-size: 11px;
+  opacity: 0.8;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

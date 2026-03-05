@@ -308,43 +308,58 @@ async fn main() -> Result<()> {
         let mut event_count: u64 = 0;
         while let Some(event) = event_rx.recv().await {
             event_count += 1;
-            let EventEnvelope::Exchange(exchange) = &event;
-            let exchange_request_id = exchange.request.id;
-            debug!(
-                request_id = %exchange_request_id,
-                event_count,
-                "event_dispatch: received exchange from proxy engine"
-            );
-            if let Err(err) = storage_tx.send(exchange.clone()).await {
-                error!(
-                    %err,
-                    request_id = %exchange_request_id,
-                    "storage ingestion channel closed"
-                );
-            }
 
-            let dispatch_started = std::time::Instant::now();
-            let payload = serde_json::to_value(exchange).unwrap_or(serde_json::Value::Null);
-            let plugin_results = plugins_for_loop
-                .invoke_all("on_exchange", payload, Duration::from_millis(200))
-                .await;
-            for result in plugin_results {
-                if let Ok(response) = result {
-                    let _ = apply_plugin_output_ops(
-                        &app_state_for_plugins,
-                        &ui_modules_for_plugins,
-                        &response.output,
-                        Some(&response.plugin),
+            match &event {
+                EventEnvelope::Exchange(exchange) => {
+                    let exchange_request_id = exchange.request.id;
+                    debug!(
+                        request_id = %exchange_request_id,
+                        event_count,
+                        "event_dispatch: received exchange from proxy engine"
+                    );
+                    if let Err(err) = storage_tx.send(exchange.clone()).await {
+                        error!(
+                            %err,
+                            request_id = %exchange_request_id,
+                            "storage ingestion channel closed"
+                        );
+                    }
+
+                    let dispatch_started = std::time::Instant::now();
+                    let payload =
+                        serde_json::to_value(exchange).unwrap_or(serde_json::Value::Null);
+                    let plugin_results = plugins_for_loop
+                        .invoke_all("on_exchange", payload, Duration::from_millis(200))
+                        .await;
+                    for result in plugin_results {
+                        if let Ok(response) = result {
+                            let _ = apply_plugin_output_ops(
+                                &app_state_for_plugins,
+                                &ui_modules_for_plugins,
+                                &response.output,
+                                Some(&response.plugin),
+                            );
+                        }
+                    }
+
+                    debug!(
+                        request_id = %exchange_request_id,
+                        plugin_ms = dispatch_started.elapsed().as_millis() as u64,
+                        ws_clients = ws_hub_for_loop.client_count(),
+                        "event_dispatch: publishing exchange to WebSocket hub"
+                    );
+                }
+                EventEnvelope::WsMessage(ws_msg) => {
+                    debug!(
+                        connection_id = %ws_msg.connection_id,
+                        direction = ?ws_msg.direction,
+                        opcode = ?ws_msg.opcode,
+                        event_count,
+                        "event_dispatch: received WebSocket message from proxy engine"
                     );
                 }
             }
 
-            debug!(
-                request_id = %exchange_request_id,
-                plugin_ms = dispatch_started.elapsed().as_millis() as u64,
-                ws_clients = ws_hub_for_loop.client_count(),
-                "event_dispatch: publishing exchange to WebSocket hub"
-            );
             ws_hub_for_loop.publish(&event);
         }
         debug!(

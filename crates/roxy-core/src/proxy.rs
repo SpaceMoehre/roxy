@@ -37,6 +37,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, StatusCode,
@@ -51,6 +52,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
 };
 use tokio_boring::{accept as tls_accept, connect as tls_connect};
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -65,8 +67,9 @@ use crate::{
     config::ProxyConfig,
     middleware::ProxyMiddleware,
     model::{
-        CapturedExchange, CapturedRequest, CapturedResponse, EventEnvelope, HeaderValuePair,
-        apply_mutation, apply_response_mutation, headers_to_pairs, now_unix_ms,
+        CapturedExchange, CapturedRequest, CapturedResponse, CapturedWsMessage, EventEnvelope,
+        HeaderValuePair, WsDirection, WsOpcode, apply_mutation, apply_response_mutation,
+        headers_to_pairs, now_unix_ms,
     },
     raw_http::{build_request_blob, parse_request_blob},
     state::{
@@ -94,6 +97,12 @@ pub struct ProxyEngine {
     /// Optional request/response middleware.
     middleware: Option<Arc<dyn ProxyMiddleware>>,
 }
+
+/// Marker super-trait combining [`AsyncRead`] + [`AsyncWrite`] so we can
+/// use `Box<dyn AsyncReadWrite + Unpin + Send>` as a trait object for
+/// WebSocket upstream streams that may or may not be TLS-wrapped.
+trait AsyncReadWrite: AsyncRead + AsyncWrite {}
+impl<T: AsyncRead + AsyncWrite> AsyncReadWrite for T {}
 
 const AUTHORITY_RESOLVE_CACHE_TTL: Duration = Duration::from_secs(30);
 const DIRECT_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -263,6 +272,13 @@ impl ProxyEngine {
         if request.method() == Method::CONNECT {
             debug!(uri = %uri_preview, "handle_request: routing to CONNECT handler");
             return Ok(self.handle_connect(request));
+        }
+
+        if is_websocket_upgrade(&request) {
+            debug!(uri = %uri_preview, "handle_request: routing to WebSocket upgrade handler");
+            return self
+                .handle_websocket_upgrade(request, "http", None)
+                .await;
         }
 
         match self.forward_http_request(request, "http", None).await {
@@ -436,6 +452,15 @@ impl ProxyEngine {
             let engine = engine.clone();
             let authority = authority.clone();
             async move {
+                if is_websocket_upgrade(&req) {
+                    debug!(
+                        authority = %authority.as_str(),
+                        "serve_https_mitm: routing to WebSocket upgrade handler"
+                    );
+                    return engine
+                        .handle_websocket_upgrade(req, "https", Some(authority.as_str()))
+                        .await;
+                }
                 let cors_origin = req.headers().get(ORIGIN).cloned();
                 match engine
                     .forward_http_request(req, "https", Some(authority.as_str()))
@@ -466,6 +491,7 @@ impl ProxyEngine {
         let result = hyper::server::conn::http1::Builder::new()
             .keep_alive(true)
             .serve_connection(TokioIo::new(tls_stream), service)
+            .with_upgrades()
             .await
             .context("failed serving mitm TLS http connection");
         debug!(
@@ -488,6 +514,300 @@ impl ProxyEngine {
         let settings = self.state.upstream_proxy_settings();
         let chain = self.select_upstream_chain(hash_seed(authority.as_bytes()));
         dial_via_upstream_chain(authority, &chain, settings.proxy_dns).await
+    }
+
+    /// Handles a WebSocket upgrade request detected in MITM or plain HTTP mode.
+    ///
+    /// 1. Extracts headers from the incoming request (including `Sec-WebSocket-Key`).
+    /// 2. Registers for the hyper upgrade stream on the client side.
+    /// 3. Connects to the upstream server and sends the raw HTTP upgrade handshake.
+    /// 4. Reads the upstream 101 response and emits a `CapturedExchange` event.
+    /// 5. Returns a 101 response to the client (triggering hyper's upgrade mechanism).
+    /// 6. Spawns a background task that relays WebSocket frames between client and
+    ///    upstream, emitting `WsMessage` events for each frame.
+    async fn handle_websocket_upgrade(
+        self: Arc<Self>,
+        req: Request<Incoming>,
+        default_scheme: &str,
+        authority_hint: Option<&str>,
+    ) -> Result<Response<Full<Bytes>>, Infallible> {
+        match self
+            .try_websocket_upgrade(req, default_scheme, authority_hint)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    error_chain = %format_error_chain(&err),
+                    "WebSocket upgrade failed"
+                );
+                Ok(build_text_response(
+                    StatusCode::BAD_GATEWAY,
+                    "WebSocket upgrade failed",
+                ))
+            }
+        }
+    }
+
+    async fn try_websocket_upgrade(
+        self: Arc<Self>,
+        req: Request<Incoming>,
+        default_scheme: &str,
+        authority_hint: Option<&str>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let request_id = Uuid::new_v4();
+        let started = Instant::now();
+
+        // ── 1. Extract info from the request by borrowing ──────────────
+        let uri = req.uri().clone();
+        let headers = req.headers().clone();
+        let _ws_key = headers
+            .get("sec-websocket-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let host_str = authority_hint
+            .map(|a| a.to_string())
+            .or_else(|| {
+                headers
+                    .get(HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        let host = host_str.split(':').next().unwrap_or(&host_str).to_string();
+
+        let path_and_query = uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        let effective_uri = format!("{default_scheme}://{host_str}{path_and_query}");
+
+        debug!(
+            %request_id,
+            %effective_uri,
+            "try_websocket_upgrade: detected WebSocket upgrade"
+        );
+
+        // ── 2. Build a captured request for the handshake ──────────────
+        let request_headers = headers_to_pairs(&headers);
+        let request_blob =
+            build_request_blob("GET", path_and_query, &request_headers, &[]);
+        let captured_request = CapturedRequest {
+            id: request_id,
+            created_at_unix_ms: now_unix_ms(),
+            method: "GET".to_string(),
+            uri: effective_uri.clone(),
+            host: host.clone(),
+            headers: request_headers,
+            body: Bytes::new(),
+            raw: request_blob,
+        };
+
+        // Register the site map entry.
+        self.state
+            .register_site_path(host.clone(), path_and_query.to_string());
+
+        // ── 3. Register for client-side upgrade (consumes the request) ─
+        let on_client_upgrade = hyper::upgrade::on(req);
+
+        // ── 4. Connect upstream (TCP, optionally TLS) ──────────────────
+        let settings = self.state.upstream_proxy_settings();
+        let chain =
+            self.select_upstream_chain(hash_seed(host_str.as_bytes()));
+        let tcp_stream =
+            dial_via_upstream_chain(&host_str, &chain, settings.proxy_dns)
+                .await
+                .with_context(|| {
+                    format!("upstream WebSocket dial failed for {host_str}")
+                })?;
+
+        let mut upstream_stream: Box<dyn AsyncReadWrite + Unpin + Send> =
+            if default_scheme == "https" {
+                // WebSocket upgrades are HTTP/1.1-only, so we must use the
+                // h1-only connector to prevent the TLS ALPN from negotiating
+                // h2 (which would cause the server to reject our HTTP/1.1
+                // upgrade request).
+                let connector = client_connector_h1_only(false);
+                let mut tls_config = connector
+                    .configure()
+                    .context("upstream TLS config failed for WebSocket")?;
+                apply_ech_client_config(&mut tls_config, &host, None).await;
+                let tls_stream = tls_connect(tls_config, &host, tcp_stream)
+                    .await
+                    .map_err(|e| {
+                        anyhow!("upstream TLS handshake failed for WebSocket: {e}")
+                    })?;
+                Box::new(tls_stream)
+            } else {
+                Box::new(tcp_stream)
+            };
+
+        // ── 5. Send the raw HTTP upgrade request to upstream ───────────
+        let raw_upgrade_request =
+            format_upstream_ws_request(path_and_query, &headers);
+        upstream_stream
+            .write_all(raw_upgrade_request.as_bytes())
+            .await
+            .context("failed sending WS upgrade to upstream")?;
+        upstream_stream
+            .flush()
+            .await
+            .context("failed flushing WS upgrade to upstream")?;
+
+        // ── 6. Read the upstream 101 response ──────────────────────────
+        let (status_line, response_headers) =
+            read_http_response_head(&mut upstream_stream)
+                .await
+                .context("failed reading upstream WS upgrade response")?;
+
+        let upstream_status = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        if upstream_status != 101 {
+            let msg = format!(
+                "upstream rejected WebSocket upgrade with status {upstream_status}"
+            );
+            warn!(%request_id, %msg);
+            // Emit the exchange with the upstream error.
+            let captured_response = CapturedResponse {
+                request_id,
+                created_at_unix_ms: now_unix_ms(),
+                status: upstream_status,
+                headers: response_headers
+                    .iter()
+                    .map(|(n, v)| HeaderValuePair {
+                        name: n.clone(),
+                        value: v.clone(),
+                    })
+                    .collect(),
+                body: Bytes::new(),
+            };
+            let exchange = CapturedExchange {
+                request: captured_request,
+                response: Some(captured_response),
+                duration_ms: started.elapsed().as_millis(),
+                error: Some(msg.clone()),
+            };
+            let _ = self.event_tx.try_send(EventEnvelope::Exchange(exchange));
+            return Ok(build_text_response(
+                StatusCode::from_u16(upstream_status)
+                    .unwrap_or(StatusCode::BAD_GATEWAY),
+                &msg,
+            ));
+        }
+
+        debug!(
+            %request_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "try_websocket_upgrade: upstream responded 101, establishing relay"
+        );
+
+        // ── 7. Emit the handshake exchange event ───────────────────────
+        let captured_response = CapturedResponse {
+            request_id,
+            created_at_unix_ms: now_unix_ms(),
+            status: 101,
+            headers: response_headers
+                .iter()
+                .map(|(n, v)| HeaderValuePair {
+                    name: n.clone(),
+                    value: v.clone(),
+                })
+                .collect(),
+            body: Bytes::new(),
+        };
+        let exchange = CapturedExchange {
+            request: captured_request,
+            response: Some(captured_response),
+            duration_ms: started.elapsed().as_millis(),
+            error: None,
+        };
+        let _ = self.event_tx.try_send(EventEnvelope::Exchange(exchange));
+
+        // ── 8. Build 101 response for the client ───────────────────────
+        let mut response_builder = Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header("upgrade", "websocket")
+            .header("connection", "upgrade");
+
+        // Forward the accept key and negotiated subprotocol / extensions
+        // from the upstream response.
+        for (name, value) in &response_headers {
+            let lc = name.to_ascii_lowercase();
+            if lc == "sec-websocket-accept"
+                || lc == "sec-websocket-protocol"
+                || lc == "sec-websocket-extensions"
+            {
+                if let (Ok(hn), Ok(hv)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    response_builder = response_builder.header(hn, hv);
+                }
+            }
+        }
+
+        let client_response = response_builder
+            .body(Full::new(Bytes::new()))
+            .context("failed building 101 client response")?;
+
+        // ── 9. Spawn a background task to relay WebSocket frames ───────
+        let connection_id = Uuid::new_v4();
+        let event_tx = self.event_tx.clone();
+        let host_bg = host.clone();
+        let uri_bg = effective_uri.clone();
+
+        tokio::spawn(async move {
+            match on_client_upgrade.await {
+                Ok(upgraded) => {
+                    let client_io = TokioIo::new(upgraded);
+                    debug!(
+                        %request_id,
+                        %connection_id,
+                        "websocket relay: client upgrade succeeded, starting frame relay"
+                    );
+
+                    let client_ws = WebSocketStream::from_raw_socket(
+                        client_io,
+                        tokio_tungstenite::tungstenite::protocol::Role::Server,
+                        None,
+                    )
+                    .await;
+                    let upstream_ws = WebSocketStream::from_raw_socket(
+                        upstream_stream,
+                        tokio_tungstenite::tungstenite::protocol::Role::Client,
+                        None,
+                    )
+                    .await;
+
+                    relay_ws_frames(
+                        client_ws,
+                        upstream_ws,
+                        connection_id,
+                        event_tx,
+                        host_bg,
+                        uri_bg,
+                    )
+                    .await;
+                    debug!(
+                        %request_id,
+                        %connection_id,
+                        "websocket relay: frame relay ended"
+                    );
+                }
+                Err(err) => {
+                    warn!(%request_id, %err, "websocket relay: client upgrade failed");
+                }
+            }
+        });
+
+        Ok(client_response)
     }
 
     async fn forward_upstream_request(
@@ -2102,6 +2422,169 @@ fn increment_port(mut addr: SocketAddr) -> io::Result<SocketAddr> {
     }
     addr.set_port(port + 1);
     Ok(addr)
+}
+
+/// Returns `true` when the request carries `Upgrade: websocket`.
+fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+    req.headers()
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+/// Formats all original request headers into a raw HTTP/1.1 upgrade
+/// request blob suitable for sending to the upstream server.
+fn format_upstream_ws_request(path_and_query: &str, original_headers: &http::HeaderMap) -> String {
+    let mut req = format!("GET {path_and_query} HTTP/1.1\r\n");
+    for (name, value) in original_headers.iter() {
+        if let Ok(v) = value.to_str() {
+            let _ = write!(req, "{}: {v}\r\n", name.as_str());
+        }
+    }
+    req.push_str("\r\n");
+    req
+}
+
+/// Reads bytes from `stream` until the `\r\n\r\n` HTTP header terminator is
+/// seen, then parses the status line and response headers.
+async fn read_http_response_head<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<(String, Vec<(String, String)>)> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut byte = [0u8; 1];
+
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .await
+            .context("read_http_response_head: read error")?;
+        if n == 0 {
+            return Err(anyhow!(
+                "upstream connection closed before HTTP response headers complete"
+            ));
+        }
+        buf.push(byte[0]);
+        if buf.len() >= 4 && buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        anyhow::ensure!(
+            buf.len() < 16384,
+            "upstream HTTP response headers exceed 16 KiB"
+        );
+    }
+
+    let head = String::from_utf8_lossy(&buf).to_string();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or("").to_string();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    Ok((status_line, headers))
+}
+
+/// Bidirectionally relays WebSocket frames between `client_ws` and
+/// `upstream_ws`, emitting a [`CapturedWsMessage`] event for every frame.
+async fn relay_ws_frames<C, U>(
+    mut client_ws: WebSocketStream<C>,
+    mut upstream_ws: WebSocketStream<U>,
+    connection_id: Uuid,
+    event_tx: mpsc::Sender<EventEnvelope>,
+    host: String,
+    uri: String,
+) where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        tokio::select! {
+            msg = StreamExt::next(&mut client_ws) => {
+                match msg {
+                    Some(Ok(frame)) => {
+                        let captured = ws_frame_to_capture(
+                            &frame,
+                            connection_id,
+                            WsDirection::ClientToServer,
+                            &host,
+                            &uri,
+                        );
+                        let _ = event_tx.try_send(EventEnvelope::WsMessage(captured));
+                        if frame.is_close() {
+                            let _ = SinkExt::send(&mut upstream_ws, frame).await;
+                            break;
+                        }
+                        if SinkExt::send(&mut upstream_ws, frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            msg = StreamExt::next(&mut upstream_ws) => {
+                match msg {
+                    Some(Ok(frame)) => {
+                        let captured = ws_frame_to_capture(
+                            &frame,
+                            connection_id,
+                            WsDirection::ServerToClient,
+                            &host,
+                            &uri,
+                        );
+                        let _ = event_tx.try_send(EventEnvelope::WsMessage(captured));
+                        if frame.is_close() {
+                            let _ = SinkExt::send(&mut client_ws, frame).await;
+                            break;
+                        }
+                        if SinkExt::send(&mut client_ws, frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+}
+
+/// Converts a tungstenite [`Message`] into a [`CapturedWsMessage`].
+fn ws_frame_to_capture(
+    msg: &tokio_tungstenite::tungstenite::Message,
+    connection_id: Uuid,
+    direction: WsDirection,
+    host: &str,
+    uri: &str,
+) -> CapturedWsMessage {
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (opcode, payload_text, payload_length) = match msg {
+        Message::Text(text) => (WsOpcode::Text, Some(text.to_string()), text.len()),
+        Message::Binary(data) => (WsOpcode::Binary, None, data.len()),
+        Message::Ping(data) => (WsOpcode::Ping, None, data.len()),
+        Message::Pong(data) => (WsOpcode::Pong, None, data.len()),
+        Message::Close(cf) => {
+            let text = cf.as_ref().map(|f| format!("{}: {}", f.code, f.reason));
+            let len = text.as_ref().map(|t| t.len()).unwrap_or(0);
+            (WsOpcode::Close, text, len)
+        }
+        Message::Frame(f) => (WsOpcode::Binary, None, f.len()),
+    };
+
+    CapturedWsMessage {
+        id: Uuid::new_v4(),
+        connection_id,
+        timestamp_ms: now_unix_ms(),
+        direction,
+        opcode,
+        payload_text,
+        payload_length,
+        host: host.to_string(),
+        uri: uri.to_string(),
+    }
 }
 
 #[cfg(test)]

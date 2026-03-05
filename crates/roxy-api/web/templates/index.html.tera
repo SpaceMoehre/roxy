@@ -117,6 +117,7 @@
           <div class="proxy-subtabs">
             <button class="proxy-subtab active" data-proxy-tab="intercept">Intercept Queue</button>
             <button class="proxy-subtab" data-proxy-tab="history">Proxy History</button>
+            <button class="proxy-subtab" data-proxy-tab="ws-history">WebSocket History</button>
           </div>
 
           <div class="proxy-subpanel active" id="proxy-subpanel-intercept">
@@ -226,6 +227,32 @@
                       <h4>Response</h4>
                       <pre id="proxy-history-response" class="output"></pre>
                     </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="proxy-subpanel" id="proxy-subpanel-ws-history">
+            <article class="card">
+              <div class="panel-head">
+                <h3>WebSocket Messages</h3>
+                <div class="panel-head-actions">
+                  <button id="clear-ws-history" type="button">Clear</button>
+                </div>
+              </div>
+              <div class="proxy-history-layout">
+                <div class="proxy-history-upper">
+                  <div id="ws-history-list" class="scroll-list"></div>
+                </div>
+                <div class="proxy-history-lower">
+                  <div class="proxy-history-toolbar">
+                    <div id="ws-history-meta" class="status">No WebSocket messages captured</div>
+                  </div>
+                  <div id="ws-history-empty" class="scroll-item">WebSocket messages from proxied connections will appear here.</div>
+                  <div id="ws-history-detail" style="display:none;">
+                    <div class="ws-detail-meta" id="ws-detail-meta"></div>
+                    <pre id="ws-detail-payload" class="output"></pre>
                   </div>
                 </div>
               </div>

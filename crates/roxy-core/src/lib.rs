@@ -34,8 +34,8 @@ pub use intruder::{
 };
 pub use middleware::ProxyMiddleware;
 pub use model::{
-    CapturedExchange, CapturedRequest, CapturedResponse, EventEnvelope, HeaderValuePair,
-    RequestMutation, ResponseMutation,
+    CapturedExchange, CapturedRequest, CapturedResponse, CapturedWsMessage, EventEnvelope,
+    HeaderValuePair, RequestMutation, ResponseMutation, WsDirection, WsOpcode,
 };
 pub use outbound::{OutboundResponse, send_parsed_request};
 pub use proxy::ProxyEngine;
