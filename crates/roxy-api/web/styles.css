@@ -637,6 +637,27 @@ body {
   background: var(--accent-soft);
 }
 
+.proxy-history-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.proxy-history-primary {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-history-inline-meta {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
 .stack {
   display: grid;
   gap: 5px;

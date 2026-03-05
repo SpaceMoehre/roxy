@@ -1832,14 +1832,14 @@ function renderProxyHistoryList() {
     const req = row.exchange.request;
     const resp = row.exchange.response;
     const item = document.createElement('div');
-    item.className = 'scroll-item';
+    item.className = 'scroll-item proxy-history-list-item';
     if (row.id === appState.selectedProxyHistoryId) {
       item.classList.add('active');
     }
 
     item.innerHTML = `
-      <strong>${req.method}</strong> ${req.uri}<br>
-      <small>${req.host} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms</small>
+      <div class="proxy-history-primary"><strong>${req.method}</strong> ${req.uri}</div>
+      <small class="proxy-history-inline-meta">${req.host} · ${resp ? resp.status : 'no response'} · ${row.exchange.duration_ms}ms</small>
     `;
 
     item.addEventListener('click', () => {
