@@ -235,10 +235,14 @@
     const domain = extractDomain(raw);
 
     // Prevent duplicate scan on the same domain.
-    for (const j of _jobs.values()) {
-      if (j.status === "running" && j.domain === domain) {
-        setStatus(container, "Already enumerating " + domain + ".", true);
-        return;
+    for (const [id, j] of _jobs.entries()) {
+      if (j.domain === domain) {
+        if (j.status === "running") {
+          setStatus(container, "Already enumerating " + domain + ".", true);
+          return;
+        }
+        // Remove completed/errored job so the new one replaces it.
+        _jobs.delete(id);
       }
     }
 
@@ -344,9 +348,11 @@
         });
       }
 
-      // Initially hide jobs section until first scan.
-      const jobsSection = container.querySelector("#plugins-sublist3r-jobs");
-      if (jobsSection) jobsSection.style.display = "none";
+      // Show jobs section if there are existing jobs, otherwise hide.
+      renderJobs(container);
+      if (_selectedJobId && _jobs.has(_selectedJobId)) {
+        selectJob(container, _selectedJobId);
+      }
 
       // Add All to Scope.
       const addAllBtn = qs(container, "sublist3r-add-all");

@@ -350,10 +350,14 @@
 
     // Prevent duplicate scan on the same host.
     const host = extractHost(url);
-    for (const j of _jobs.values()) {
-      if (j.status === "running" && extractHost(j.target) === host) {
-        setStatus(container, "Already scanning " + host + ".", true);
-        return;
+    for (const [id, j] of _jobs.entries()) {
+      if (extractHost(j.target) === host) {
+        if (j.status === "running") {
+          setStatus(container, "Already scanning " + host + ".", true);
+          return;
+        }
+        // Remove completed/errored job so the new one replaces it.
+        _jobs.delete(id);
       }
     }
 
@@ -542,9 +546,11 @@
         });
       }
 
-      // Initially hide jobs section until first scan.
-      const jobsSection = container.querySelector("#plugins-photon-jobs");
-      if (jobsSection) jobsSection.style.display = "none";
+      // Show jobs section if there are existing jobs, otherwise hide.
+      renderJobs(container);
+      if (_selectedJobId && _jobs.has(_selectedJobId)) {
+        selectJob(container, _selectedJobId);
+      }
     },
 
     readSettings(container, currentSettings) {
