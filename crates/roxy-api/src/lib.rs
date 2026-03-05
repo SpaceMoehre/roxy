@@ -1290,8 +1290,12 @@ async fn invoke_plugin(
         .await
     {
         Ok(result) => {
-            let applied =
-                apply_plugin_output_ops(&state.app_state, &state.ui_modules, &result.output, Some(&path.id));
+            let applied = apply_plugin_output_ops(
+                &state.app_state,
+                &state.ui_modules,
+                &result.output,
+                Some(&path.id),
+            );
             HttpResponse::Ok().json(&serde_json::json!({
                 "plugin_result": result,
                 "state_ops_applied": applied.state_ops_applied,
@@ -1345,7 +1349,12 @@ async fn invoke_plugin_stream(
         // Process the final result.
         let outcome = match result_rx.await {
             Ok(Ok(result)) => {
-                let applied = apply_plugin_output_ops(&app_state, &ui_modules, &result.output, Some(&plugin_name_bg));
+                let applied = apply_plugin_output_ops(
+                    &app_state,
+                    &ui_modules,
+                    &result.output,
+                    Some(&plugin_name_bg),
+                );
                 serde_json::json!({
                     "plugin_result": result,
                     "state_ops_applied": applied.state_ops_applied,

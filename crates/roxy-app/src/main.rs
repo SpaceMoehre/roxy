@@ -143,7 +143,12 @@ impl ProxyMiddleware for PluginBridgeMiddleware {
         for result in plugin_results {
             match result {
                 Ok(response) => {
-                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output, Some(&response.plugin));
+                    apply_plugin_output_ops(
+                        &self.app_state,
+                        &self.ui_modules,
+                        &response.output,
+                        Some(&response.plugin),
+                    );
                     let before = out.raw.clone();
                     out = apply_request_middleware_output(out, &response.output)?;
                     if out.raw != before {
@@ -208,7 +213,12 @@ impl ProxyMiddleware for PluginBridgeMiddleware {
         for result in plugin_results {
             match result {
                 Ok(response) => {
-                    apply_plugin_output_ops(&self.app_state, &self.ui_modules, &response.output, Some(&response.plugin));
+                    apply_plugin_output_ops(
+                        &self.app_state,
+                        &self.ui_modules,
+                        &response.output,
+                        Some(&response.plugin),
+                    );
                     let before_status = out.status;
                     let before_headers = out.headers.clone();
                     let before_body = out.body.clone();
@@ -337,7 +347,10 @@ async fn main() -> Result<()> {
             );
             ws_hub_for_loop.publish(&event);
         }
-        debug!(total_events = event_count, "event_dispatch: channel closed, exiting");
+        debug!(
+            total_events = event_count,
+            "event_dispatch: channel closed, exiting"
+        );
     });
 
     let mut intruder_events = intruder.subscribe_events();
@@ -601,7 +614,10 @@ async fn run_ingress_with_shutdown(
     // tunnels, etc.) so the process can exit cleanly.
     let active = connection_tasks.len();
     if active > 0 {
-        info!(active_connections = active, "aborting active connection handlers");
+        info!(
+            active_connections = active,
+            "aborting active connection handlers"
+        );
         connection_tasks.shutdown().await;
     }
 
@@ -963,7 +979,12 @@ async fn auto_register_plugins(
             .await
         {
             Ok(result) => {
-                let applied = apply_plugin_output_ops(app_state, ui_modules, &result.output, Some(&plugin_name));
+                let applied = apply_plugin_output_ops(
+                    app_state,
+                    ui_modules,
+                    &result.output,
+                    Some(&plugin_name),
+                );
                 info!(
                     %plugin_name,
                     state_ops_applied = applied.state_ops_applied,
@@ -1320,7 +1341,11 @@ fn apply_plugin_state_ops(app_state: &AppState, output: &Value) -> usize {
     applied
 }
 
-fn apply_plugin_ui_modules(ui_modules: &UiModuleRegistry, output: &Value, plugin_name: Option<&str>) -> usize {
+fn apply_plugin_ui_modules(
+    ui_modules: &UiModuleRegistry,
+    output: &Value,
+    plugin_name: Option<&str>,
+) -> usize {
     let Some(modules) = output.get("register_ui_modules").and_then(Value::as_array) else {
         return 0;
     };

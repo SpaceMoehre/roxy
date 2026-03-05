@@ -1576,9 +1576,7 @@ async fn resolve_authority_candidates(authority: &str) -> Result<Vec<String>> {
                 elapsed_ms = dns_started.elapsed().as_millis() as u64,
                 "resolve_authority_candidates: DNS lookup timed out after 10s"
             );
-            return Err(anyhow!(
-                "dns lookup timed out after 10s for {host}:{port}"
-            ));
+            return Err(anyhow!("dns lookup timed out after 10s for {host}:{port}"));
         }
     };
     let mut addrs: Vec<SocketAddr> = resolved.collect();

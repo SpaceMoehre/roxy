@@ -217,10 +217,7 @@ fn root_params() -> CertificateParams {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.not_before = date_time_ymd(2024, 1, 1);
     params.not_after = date_time_ymd(2040, 1, 1);
-    params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params
 }
 
